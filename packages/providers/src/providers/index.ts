@@ -38,6 +38,14 @@ export {
 export { NanoGPTProvider } from "./nanogpt/index";
 export { OllamaCloudProvider, OllamaProvider } from "./ollama/index";
 export { OpenAICompatibleProvider } from "./openai/index";
+// GAMBIARRA LOCAL - NAO SUBIR PARA tombii/better-ccflare.
+// Reexportada so para o seletor de conta do proxy poder consulta-la.
+// Ver ./openai/GAMBIARRA-mapa-deepseek.ts e GAMBIARRA-NAO-SUBIR.md na raiz.
+export {
+	GAMBIARRA_DEEPSEEK_MODELS,
+	gambiarraDeepSeekServesModel,
+	isGambiarraDeepSeekAccount,
+} from "./openai/index";
 export { OpenRouterProvider } from "./openrouter/index";
 export { type VertexAIConfig, VertexAIProvider } from "./vertex-ai/index";
 export {

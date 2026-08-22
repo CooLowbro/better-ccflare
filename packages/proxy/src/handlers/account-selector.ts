@@ -7,8 +7,10 @@ import {
 } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import {
+	gambiarraDeepSeekServesModel,
 	getRepresentativeUsageResetMs,
 	getRepresentativeUtilizationForProvider,
+	isGambiarraDeepSeekAccount,
 	isOfficialXaiEndpoint,
 	usageCache,
 } from "@better-ccflare/providers";
@@ -305,6 +307,24 @@ export function isForceAccountModelEnabled(ctx: ProxyContext): boolean {
  * substitution, which is the promise this setting actually makes.
  */
 function accountServesModel(account: Account, model: string): boolean {
+	// GAMBIARRA LOCAL - NAO SUBIR PARA tombii/better-ccflare.
+	// Ver GAMBIARRA-NAO-SUBIR.md na raiz e
+	// packages/providers/src/providers/openai/GAMBIARRA-mapa-deepseek.ts.
+	//
+	// Etapa de primeira mao para a conta DeepSeek, equivalente ao que o
+	// provedor codex ja tem logo abaixo. Sem ela a conta cai na regra 2, que
+	// para um provedor nao-Claude aceita QUALQUER id nao-Claude - e como essa
+	// conta esta em priority 0, ela viraria a primeira candidata de todo
+	// pedido gpt-5.6-*, forcando esses nomes contra a API do DeepSeek.
+	//
+	// So restringe: a conta passa a recusar o que nao esta no mapa. Nenhuma
+	// outra conta openai-compatible muda, porque o desvio e condicionado ao
+	// endpoint. E so tem efeito com force account model ligado, que e o unico
+	// caminho que chama esta funcao.
+	if (isGambiarraDeepSeekAccount(account)) {
+		return gambiarraDeepSeekServesModel(model);
+	}
+
 	const known =
 		account.provider === "codex" ? getKnownCodexModels(account.id) : null;
 	if (known) {
