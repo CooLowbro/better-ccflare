@@ -582,13 +582,17 @@ export function RateLimitProgress({
 					} else {
 						windowTimeText = `${windowRemainingMinutes}m`;
 					}
-				} else if (usage.window && isWeeklyWindow(usage.window)) {
-					// Weekly account/tier windows (seven_day, seven_day_opus,
-					// seven_day_sonnet, seven_day_fable, …) when reset time is unavailable.
-					windowTimeText = "Data unavailable";
 				} else if (usage.window === "daily" || usage.window === "monthly") {
 					// Special handling for NanoGPT when no subscription is active (PayG mode)
 					windowTimeText = "No subscription (PayG mode)";
+				} else if (usage.window) {
+					// Any named window whose reset time is unknown: the weekly account and
+					// tier windows (seven_day, seven_day_opus, seven_day_fable, …) and a
+					// 5-hour window the normalizer blanked because its reset had already
+					// passed. Without this the row renders an empty slot, which reads as a
+					// bug rather than as missing data. The time-based fallback row
+					// (window == null) is left alone: it always has a reset.
+					windowTimeText = "Data unavailable";
 				}
 
 				// Special rendering for PayG mode - just show message without progress bar
