@@ -271,9 +271,14 @@ export function collectAnthropicUsageRows(
  * the WEEKLY percentage under a "5-hour" label.
  *
  * This predicate is how a caller tells the reported row from the invented one,
- * so it can keep the first and drop the second. A window object that exists but
- * carries `utilization: null` is NOT a report — it is the normalizer refusing to
- * claim a percentage, and it must not put an empty bar on screen.
+ * so it can keep the first and drop the second. The criterion is the MARKER,
+ * not the number: an account whose payload carries a five_hour object has a
+ * 5-hour window, and its row belongs on screen even when `utilization` is null
+ * (the normalizer blanks the window when its reset has already passed, which
+ * for Codex is every reading). The row then says "Data unavailable" — honest,
+ * and visible. Only a payload with no five_hour marker at all gets no row,
+ * because there the number could only come from the fallback, which is the
+ * weekly one.
  */
 export function reportsSessionWindow(
 	usage: AnthropicUsageData | null | undefined,
@@ -285,6 +290,5 @@ export function reportsSessionWindow(
 		const rows = collectAnthropicLimitRows(usage.limits);
 		if (rows.length > 0) return rows.some((row) => row.window === "five_hour");
 	}
-	const fiveHour = (usage as unknown as Record<string, unknown>).five_hour;
-	return isUsageWindow(fiveHour) && fiveHour.utilization != null;
+	return isUsageWindow((usage as unknown as Record<string, unknown>).five_hour);
 }

@@ -497,12 +497,13 @@ describe("RateLimitProgress", () => {
 		expect(html).toContain(">44%<");
 	});
 
-	it("shows only the weekly row for the payload production actually serves", () => {
+	it("shows both rows for the payload production actually serves", () => {
 		// Copied verbatim from GET /api/accounts on 2026-08-16, after a manual
 		// refresh: the 5-hour window comes back unknown (its reset had already
-		// passed, so the normalizer refuses to claim a percentage) while the weekly
-		// window is the real one, at its cap. This is the shape the card is judged
-		// on day to day, so it gets its own case rather than a hand-made one.
+		// passed, so the normalizer blanked it) while the weekly window is the real
+		// one, at its cap. This is the shape the card is judged on day to day, so it
+		// gets its own case rather than a hand-made one. The account HAS a 5-hour
+		// window, so its row shows -- as unavailable, never as a borrowed number.
 		const html = renderToStaticMarkup(
 			<RateLimitProgress
 				resetIso="2026-08-20T18:30:13.000Z"
@@ -520,9 +521,12 @@ describe("RateLimitProgress", () => {
 			/>,
 		);
 
-		expect(html).not.toContain("Usage (5-hour)");
+		expect(html).toContain("Usage (5-hour)");
+		expect(html).toContain("Data unavailable");
 		expect(html).toContain("Usage (Weekly)");
 		expect(html).toContain(">100%<");
+		// The blanked 5-hour row must not borrow the weekly number.
+		expect(html.split(">100%<").length - 1).toBe(1);
 	});
 
 	it("warns about throttling from inside the restored 5-hour row", () => {
@@ -552,9 +556,10 @@ describe("RateLimitProgress", () => {
 	});
 
 	it("still warns about throttling on a window whose row is suppressed", () => {
-		// The row IS suppressed here (five_hour present but unclaimed), so the
-		// standalone notice is the only thing left to say requests are being
-		// delayed. This is the guard the removal added, and it stays.
+		// The row IS suppressed here: no five_hour marker at all, so there is no
+		// 5-hour row to carry the notice, and the standalone line is the only thing
+		// left to say requests are being delayed. This is the guard the removal
+		// added, and it stays.
 		const reset = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 		const throttledUntil = Date.now() + 20 * 60 * 1000;
 		const html = renderToStaticMarkup(
@@ -563,7 +568,6 @@ describe("RateLimitProgress", () => {
 				usageUtilization={95}
 				usageWindow="seven_day"
 				usageData={{
-					five_hour: { utilization: null, resets_at: null },
 					seven_day: { utilization: 95, resets_at: reset },
 				}}
 				usageThrottledUntil={throttledUntil}

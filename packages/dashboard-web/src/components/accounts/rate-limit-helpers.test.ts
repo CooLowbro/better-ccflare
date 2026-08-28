@@ -397,15 +397,16 @@ describe("reportsSessionWindow", () => {
 		).toBe(true);
 	});
 
-	it("is false when five_hour exists but claims no percentage", () => {
-		// The shape production serves for Codex: the normalizer refuses to claim a
-		// number. An empty bar is not a report.
+	it("is true when five_hour exists even with no percentage claimed", () => {
+		// The shape production serves for Codex: the account HAS the window, the
+		// normalizer just blanked it because its reset had already passed. The
+		// marker is what decides, so the row is kept and renders as unavailable.
 		expect(
 			reportsSessionWindow({
 				five_hour: { utilization: null, resets_at: null },
 				seven_day: { utilization: 100, resets_at: RESET },
 			} as AnthropicUsageData),
-		).toBe(false);
+		).toBe(true);
 	});
 
 	it("is false for a weekly-only payload, and for nothing at all", () => {
