@@ -372,12 +372,13 @@ describe("RateLimitProgress", () => {
 	});
 
 	// -------------------------------------------------------------------------
-	// Codex: the 5-hour bar was misleading (its percentage was either absent or
-	// borrowed from elapsed time), so the weekly window is the only bar left —
-	// and it must be permanent, including when there is no data at all.
+	// Codex: the 5-hour bar renders whenever the account actually reports that
+	// window. What stays banned is the INVENTED row — the one whose percentage
+	// was absent or borrowed from elapsed time. The weekly bar remains permanent,
+	// including when there is no data at all.
 	// -------------------------------------------------------------------------
 
-	it("drops the Codex 5-hour row and keeps the weekly one", () => {
+	it("keeps the Codex 5-hour row when the account reports that window", () => {
 		const fiveHourReset = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 		const sevenDayReset = new Date(
 			Date.now() + 3 * 24 * 60 * 60 * 1000,
@@ -396,12 +397,36 @@ describe("RateLimitProgress", () => {
 			/>,
 		);
 
-		expect(html).not.toContain("Usage (5-hour)");
+		expect(html).toContain("Usage (5-hour)");
 		expect(html).toContain("Usage (Weekly)");
 		expect(html).toContain(">63%<");
 		// Anchored to the percentage span: a bare "10%" also matches the tooltip's
 		// CSS `clamp(10%, ...)`, which has nothing to do with the 5-hour window.
-		expect(html).not.toContain(">10%<");
+		expect(html).toContain(">10%<");
+	});
+
+	it("still drops the invented Codex 5-hour row when only weekly is reported", () => {
+		// The regression the removal was aimed at: with no five_hour object, the
+		// legacy path synthesizes one from usageUtilization — which here is the
+		// WEEKLY number. It must not reappear under a "5-hour" label.
+		const sevenDayReset = new Date(
+			Date.now() + 3 * 24 * 60 * 60 * 1000,
+		).toISOString();
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={sevenDayReset}
+				usageUtilization={63}
+				usageWindow="seven_day"
+				usageData={{
+					seven_day: { utilization: 63, resets_at: sevenDayReset },
+				}}
+				provider="codex"
+				showWeekly
+			/>,
+		);
+
+		expect(html).not.toContain("Usage (5-hour)");
+		expect(html).toContain("Usage (Weekly)");
 	});
 
 	it("keeps the same Anthropic payload's 5-hour row for Anthropic", () => {
@@ -455,9 +480,9 @@ describe("RateLimitProgress", () => {
 		expect(html).not.toContain("Rate limit window");
 	});
 
-	it("does not resurrect the Codex 5-hour row through the single-window fallback", () => {
-		// usageUtilization + usageWindow="five_hour" with no full payload used to
-		// take the "most restrictive window" path and print a 5-hour bar.
+	it("renders the Codex 5-hour row from the single-window fallback", () => {
+		// usageUtilization + usageWindow="five_hour" is the account reporting that
+		// window as its most restrictive one. Reported is reported: it renders.
 		const html = renderToStaticMarkup(
 			<RateLimitProgress
 				resetIso={new Date(Date.now() + 60 * 60 * 1000).toISOString()}
@@ -468,17 +493,17 @@ describe("RateLimitProgress", () => {
 			/>,
 		);
 
-		expect(html).not.toContain("Usage (5-hour)");
-		expect(html).not.toContain("44%");
-		expect(html).toContain("Usage (Weekly)");
+		expect(html).toContain("Usage (5-hour)");
+		expect(html).toContain(">44%<");
 	});
 
-	it("shows only the weekly row for the payload production actually serves", () => {
+	it("shows both rows for the payload production actually serves", () => {
 		// Copied verbatim from GET /api/accounts on 2026-08-16, after a manual
 		// refresh: the 5-hour window comes back unknown (its reset had already
-		// passed, so the normalizer refuses to claim a percentage) while the weekly
-		// window is the real one, at its cap. This is the shape the card is judged
-		// on day to day, so it gets its own case rather than a hand-made one.
+		// passed, so the normalizer blanked it) while the weekly window is the real
+		// one, at its cap. This is the shape the card is judged on day to day, so it
+		// gets its own case rather than a hand-made one. The account HAS a 5-hour
+		// window, so its row shows -- as unavailable, never as a borrowed number.
 		const html = renderToStaticMarkup(
 			<RateLimitProgress
 				resetIso="2026-08-20T18:30:13.000Z"
@@ -496,20 +521,55 @@ describe("RateLimitProgress", () => {
 			/>,
 		);
 
-		expect(html).not.toContain("Usage (5-hour)");
+		expect(html).toContain("Usage (5-hour)");
+		expect(html).toContain("Data unavailable");
 		expect(html).toContain("Usage (Weekly)");
 		expect(html).toContain(">100%<");
+		// The blanked 5-hour row must not borrow the weekly number.
+		expect(html.split(">100%<").length - 1).toBe(1);
 	});
 
-	it("still warns about throttling on a window whose row was suppressed", () => {
-		// Removing the 5-hour bar must not remove the notice that requests are
-		// actually being delayed.
+	it("warns about throttling from inside the restored 5-hour row", () => {
+		// With the window reported, the row is back and the notice rides inside it.
 		const throttledUntil = Date.now() + 20 * 60 * 1000;
 		const html = renderToStaticMarkup(
 			<RateLimitProgress
 				resetIso={new Date(Date.now() + 60 * 60 * 1000).toISOString()}
 				usageUtilization={95}
 				usageWindow="five_hour"
+				usageThrottledUntil={throttledUntil}
+				usageThrottledWindows={["five_hour"]}
+				provider="codex"
+				showWeekly
+			/>,
+		);
+
+		expect(html).toContain(
+			"Usage throttling enabled; requests are being delayed",
+		);
+		expect(html).toContain("Usage (5-hour)");
+		// Exactly one notice: the standalone orphan line must not double up.
+		expect(
+			html.split("Usage throttling enabled; requests are being delayed")
+				.length - 1,
+		).toBe(1);
+	});
+
+	it("still warns about throttling on a window whose row is suppressed", () => {
+		// The row IS suppressed here: no five_hour marker at all, so there is no
+		// 5-hour row to carry the notice, and the standalone line is the only thing
+		// left to say requests are being delayed. This is the guard the removal
+		// added, and it stays.
+		const reset = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+		const throttledUntil = Date.now() + 20 * 60 * 1000;
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={reset}
+				usageUtilization={95}
+				usageWindow="seven_day"
+				usageData={{
+					seven_day: { utilization: 95, resets_at: reset },
+				}}
 				usageThrottledUntil={throttledUntil}
 				usageThrottledWindows={["five_hour"]}
 				provider="codex"

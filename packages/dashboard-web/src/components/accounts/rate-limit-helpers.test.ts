@@ -7,6 +7,7 @@ import {
 	formatWindowName,
 	isUsageWindow,
 	isWeeklyWindow,
+	reportsSessionWindow,
 	severityColor,
 } from "./rate-limit-helpers";
 
@@ -378,5 +379,43 @@ describe("collectAnthropicLimitRows — scoped identity (Greptile P2)", () => {
 		const windows = rows.map((r) => r.window);
 		expect(new Set(windows).size).toBe(3); // all distinct -> no duplicate React keys
 		expect(windows[0]).toBe("seven_day_fable"); // first stays byte-stable
+	});
+});
+
+describe("reportsSessionWindow", () => {
+	it("is true when limits[] carries a session entry", () => {
+		expect(
+			reportsSessionWindow({ limits: LIMITS_FIXTURE } as AnthropicUsageData),
+		).toBe(true);
+	});
+
+	it("is true for a legacy five_hour window with a percentage", () => {
+		expect(
+			reportsSessionWindow({
+				five_hour: { utilization: 10, resets_at: RESET },
+			} as AnthropicUsageData),
+		).toBe(true);
+	});
+
+	it("is true when five_hour exists even with no percentage claimed", () => {
+		// The shape production serves for Codex: the account HAS the window, the
+		// normalizer just blanked it because its reset had already passed. The
+		// marker is what decides, so the row is kept and renders as unavailable.
+		expect(
+			reportsSessionWindow({
+				five_hour: { utilization: null, resets_at: null },
+				seven_day: { utilization: 100, resets_at: RESET },
+			} as AnthropicUsageData),
+		).toBe(true);
+	});
+
+	it("is false for a weekly-only payload, and for nothing at all", () => {
+		expect(
+			reportsSessionWindow({
+				seven_day: { utilization: 63, resets_at: RESET },
+			} as AnthropicUsageData),
+		).toBe(false);
+		expect(reportsSessionWindow(null)).toBe(false);
+		expect(reportsSessionWindow(undefined)).toBe(false);
 	});
 });
