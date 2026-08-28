@@ -784,21 +784,18 @@ export function RateLimitProgress({
 								</span>
 							</div>
 						)}
-						{!usage.resetTime &&
-							((usage.window && isWeeklyWindow(usage.window)) ||
-								usage.window === "daily" ||
-								usage.window === "monthly") && (
-								<div className="flex items-center justify-between">
-									<span className="text-xs text-muted-foreground">
-										{windowTimeText}
-									</span>
-									<span className="text-xs text-muted-foreground">
-										{usage.window === "daily" || usage.window === "monthly"
-											? "Using pay-as-you-go"
-											: "No reset data available"}
-									</span>
-								</div>
-							)}
+						{!usage.resetTime && usage.window && (
+							<div className="flex items-center justify-between">
+								<span className="text-xs text-muted-foreground">
+									{windowTimeText}
+								</span>
+								<span className="text-xs text-muted-foreground">
+									{usage.window === "daily" || usage.window === "monthly"
+										? "Using pay-as-you-go"
+										: "No reset data available"}
+								</span>
+							</div>
+						)}
 					</div>
 				);
 			})}
