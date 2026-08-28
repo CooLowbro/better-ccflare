@@ -13,6 +13,7 @@ import {
 	collectAnthropicUsageRows,
 	formatWindowName,
 	isWeeklyWindow,
+	reportsSessionWindow,
 	severityColor,
 	type UsageDisplay,
 } from "./rate-limit-helpers";
@@ -152,10 +153,10 @@ export function RateLimitProgress({
 		return unregisterInterval;
 	}, []);
 
-	// Codex has no usage-polling endpoint, so gaps in its data are routine (the
-	// weekly percentage arrives only piggybacked on real traffic). The weekly bar
-	// is its only quota bar and must stay on screen through those gaps, saying
-	// "Data unavailable" instead of vanishing — a missing bar reads as "no limit".
+	// Codex has no usage-polling endpoint, so gaps in its data are routine (its
+	// percentages arrive only piggybacked on real traffic). Its quota bars must
+	// stay on screen through those gaps, saying "Data unavailable" instead of
+	// vanishing — a missing bar reads as "no limit".
 	const isCodex = provider === "codex";
 
 	// Allow null resetIso for providers that show usage data (like NanoGPT in PayG mode)
@@ -434,20 +435,24 @@ export function RateLimitProgress({
 				resetTime: resetIso,
 			},
 		);
-		// Codex: drop the 5-hour row entirely. Its percentage is either absent or
-		// borrowed from the time-elapsed fallback, so the bar showed how much of
-		// the window had passed as if it were consumption. The weekly window is
-		// what actually limits a Codex account, and it is the only bar kept here.
+		// Codex: keep the 5-hour row when the account really reports that window,
+		// and drop it only when collectAnthropicUsageRows had to invent one. The
+		// invented row carries the fallback percentage — for Codex the WEEKLY
+		// number under a "5-hour" label — and that lie is what the row was removed
+		// over. The window itself is legitimate whenever it is actually reported.
+		const codexHidesSession =
+			isCodex &&
+			!reportsSessionWindow(usageData as unknown as AnthropicUsageData);
 		usages.push(
-			...(isCodex ? rows.filter((row) => row.window !== "five_hour") : rows),
+			...(codexHidesSession
+				? rows.filter((row) => row.window !== "five_hour")
+				: rows),
 		);
 	} else if (
 		providerShowsWeeklyUsage(provider) &&
 		usageUtilization !== null &&
 		usageUtilization !== undefined &&
-		usageWindow &&
-		// Never let the 5-hour window back in for Codex through this fallback.
-		!(isCodex && usageWindow === "five_hour")
+		usageWindow
 	) {
 		// Fallback: show only the most restrictive window
 		usages.push({
@@ -456,11 +461,12 @@ export function RateLimitProgress({
 			resetTime: resetIso,
 		});
 	} else if (isCodex) {
-		// Back door closed: the time-based bar below is hardcoded to a 5-hour
-		// window, so without this branch removing the Codex 5h row above would just
-		// bring it back through here whenever data is missing. Show the weekly
-		// window as unavailable instead — the render path already prints "N/A" and
-		// "Data unavailable" for a null utilization.
+		// Reached only when nothing at all was reported. The time-based bar below
+		// is hardcoded to a 5-hour window and draws ELAPSED TIME as if it were
+		// consumption — with no data there is no honest 5-hour percentage, so Codex
+		// must not fall into it. Show the weekly window as unavailable instead: the
+		// render path already prints "N/A" and "Data unavailable" for a null
+		// utilization.
 		usages.push({ utilization: null, window: "seven_day", resetTime: null });
 	} else {
 		// Use time-based percentage for non-Anthropic or when no usage data is available
@@ -480,10 +486,11 @@ export function RateLimitProgress({
 	const throttledWindowSet = new Set(usageThrottledWindows);
 
 	// The throttle notice normally rides along inside the throttled window's row.
-	// Codex no longer renders a 5-hour row, and throttling on that window still
-	// delays real requests — so surface any throttled window that has no row of
-	// its own as a standalone line. Without this, dropping the bar would also
-	// silently drop the warning.
+	// Codex renders no 5-hour row when the account does not report that window,
+	// and throttling on it still delays real requests — so surface any throttled
+	// window that has no row of its own as a standalone line. It goes quiet by
+	// itself once the row is back: renderedWindows is read from what actually
+	// rendered, so the notice can never double up.
 	const renderedWindows = new Set(
 		usages
 			.map((usage) => usage.window)
