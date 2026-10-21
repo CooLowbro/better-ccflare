@@ -1,4 +1,7 @@
-import { KNOWN_PATTERNS, providerAcceptsClientModel } from "@better-ccflare/core";
+import {
+	KNOWN_PATTERNS,
+	providerAcceptsClientModel,
+} from "@better-ccflare/core";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import { BadRequest, NotFound } from "@better-ccflare/errors";
 import type {

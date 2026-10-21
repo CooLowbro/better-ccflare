@@ -28,6 +28,16 @@ export interface ModelCatalogEntry {
 	id: string;
 	displayName: string;
 	createdAt: string | null;
+	/**
+	 * The family Anthropic itself files the model under (`opus`, `sonnet`,
+	 * `haiku`, `fable`, `mythos`, ...), read from the listing's `line` field
+	 * rather than inferred from the id. Optional: older on-disk caches and the
+	 * bundled fallback have no such field.
+	 *
+	 * Worth carrying because it is how a family the router has never heard of
+	 * announces itself — `mythos` shipped exactly that way.
+	 */
+	line?: string | null;
 }
 
 export interface ModelCatalog {
@@ -54,6 +64,7 @@ interface AnthropicModelsPageResponse {
 		id: string;
 		display_name?: string;
 		created_at?: string;
+		line?: string;
 	}>;
 	has_more?: boolean;
 	first_id?: string | null;
@@ -66,7 +77,7 @@ const FETCH_TIMEOUT_MS = 10_000;
 // Anthropic OAuth/console accounts are both served by the "anthropic"
 // provider adapter (AnthropicProvider handles token refresh + header prep
 // for both auth modes).
-const ANTHROPIC_ACCOUNT_PROVIDERS = new Set([
+export const ANTHROPIC_ACCOUNT_PROVIDERS = new Set([
 	"anthropic",
 	"claude-console-api",
 ]);
@@ -228,6 +239,28 @@ export async function fetchLiveModels(
 		);
 	}
 
+	return fetchModelsForAccount(account, ctx);
+}
+
+/**
+ * The same read, for one named account instead of whichever one this process
+ * picked.
+ *
+ * Split out because "which models exist at Anthropic" and "which models may
+ * THIS account call" are different questions that happen to share a URL. The
+ * catalog above answers the first and is a single list for the whole gateway;
+ * `anthropic-model-catalog.ts` answers the second, per account, and needs to
+ * address a specific account rather than an eligible one.
+ *
+ * Measured on 2026-10-21: two OAuth accounts on the same gateway returned 15
+ * and 14 models — `claude-mythos-5-1` is listed for one and answers
+ * `not_found_error` for the other. One account's list is therefore not a
+ * statement about the pool.
+ */
+export async function fetchModelsForAccount(
+	account: Account,
+	ctx: ProxyContext,
+): Promise<ModelCatalogEntry[]> {
 	const provider = getProvider(account.provider) || ctx.provider;
 	const accessToken = await getValidAccessToken(account, ctx);
 	const headers = provider.prepareHeaders(
@@ -271,6 +304,11 @@ export async function fetchLiveModels(
 				id: m.id,
 				displayName: m.display_name || m.id,
 				createdAt: m.created_at ?? null,
+				// Only when the listing carries one. Writing `line: null` for an
+				// entry that never had the field would change the shape of every
+				// cached catalog — including the ones already on disk — for no
+				// gain over simply not knowing.
+				...(typeof m.line === "string" && m.line ? { line: m.line } : {}),
 			});
 		}
 

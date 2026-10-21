@@ -9,6 +9,7 @@ import type {
 	AgentAttributionSource,
 	ProjectAttributionSource,
 } from "@better-ccflare/types";
+import { unionOfKnownAnthropicModels } from "./anthropic-model-catalog";
 import {
 	ANTHROPIC_TERMINAL_RECOVERY_GRACE_MS,
 	type AnthropicTerminalState,
@@ -579,6 +580,18 @@ export async function forwardToClient(
 
 	const clientBody = isModelsListingResponse
 		? mergeModelsListingStream(passthroughBody, async () => {
+				// What the accounts themselves have listed comes first, because it
+				// is the only source that distinguishes a model that exists from a
+				// model this gateway can reach. Measured 2026-10-21: the pool's two
+				// Anthropic accounts list 15 and 14 models, and the gateway can
+				// serve the union of 15 — publishing one account's 14 would hide a
+				// model that is reachable, and publishing a catalog read from a
+				// third account could offer one that is not.
+				const perAccount = unionOfKnownAnthropicModels();
+				if (perAccount.length > 0) return { catalogEntries: perAccount };
+
+				// Nothing first-hand yet (a cold start that has not served an
+				// Anthropic request). Fall back to the gateway-wide catalog.
 				const catalog = await getModelCatalog();
 				// Only a live catalog may widen a listing. The bundled fallback is
 				// a guess about what exists, and a guess presented in a listing is
