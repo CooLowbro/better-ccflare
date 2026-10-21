@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { PROVIDER_MODEL_DEFAULTS_ENV_VAR } from "@better-ccflare/config";
+import { KNOWN_PATTERNS } from "@better-ccflare/core";
 import {
 	clearDerivedProviderModelDefaults,
 	resolveProviderModelDefault,
@@ -71,12 +72,12 @@ describe("provider model defaults", () => {
 
 		const codex = body.providers.find((p) => p.provider === "codex");
 		expect(codex).toBeDefined();
-		expect(codex?.fields.map((f) => f.family).sort()).toEqual([
-			"fable",
-			"haiku",
-			"opus",
-			"sonnet",
-		]);
+		// Asserted against the routing families rather than a copy of them: the
+		// dialog must show a row for every family the router can produce, and a
+		// hardcoded list here would let a new family ship with no row.
+		expect(codex?.fields.map((f) => f.family).sort()).toEqual(
+			[...KNOWN_PATTERNS].sort(),
+		);
 		// Nothing read yet is a state to show, not a reason to hide the row.
 		expect(codex?.fields.every((f) => f.factory === null)).toBe(true);
 	});

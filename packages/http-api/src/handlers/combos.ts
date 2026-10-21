@@ -1,4 +1,4 @@
-import { providerAcceptsClientModel } from "@better-ccflare/core";
+import { KNOWN_PATTERNS, providerAcceptsClientModel } from "@better-ccflare/core";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import { BadRequest, Conflict, NotFound } from "@better-ccflare/errors";
 import type {
@@ -452,10 +452,14 @@ export function createFamiliesListHandler(dbOps: DatabaseOperations) {
 export function createFamilyAssignHandler(dbOps: DatabaseOperations) {
 	return async (req: Request, family: string): Promise<Response> => {
 		try {
-			const validFamilies: ComboFamily[] = ["fable", "opus", "sonnet", "haiku"];
-			if (!validFamilies.includes(family as ComboFamily)) {
+			// Derived from the routing patterns rather than listed again here: a
+			// family the router knows but this endpoint rejects is a combo nobody
+			// can assign, and the two lists drifting apart is exactly how that
+			// happens.
+			const validFamilies = KNOWN_PATTERNS as readonly string[];
+			if (!validFamilies.includes(family)) {
 				return errorResponse(
-					BadRequest("family must be one of: fable, opus, sonnet, haiku"),
+					BadRequest(`family must be one of: ${validFamilies.join(", ")}`),
 				);
 			}
 

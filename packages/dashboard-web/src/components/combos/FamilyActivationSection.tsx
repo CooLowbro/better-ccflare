@@ -18,13 +18,14 @@ import {
 } from "../ui/select";
 import { Switch } from "../ui/switch";
 
-const FAMILIES: ComboFamily[] = ["fable", "opus", "sonnet", "haiku"];
+const FAMILIES: ComboFamily[] = ["fable", "opus", "sonnet", "haiku", "mythos"];
 
 const FAMILY_LABELS: Record<ComboFamily, string> = {
 	fable: "Fable",
 	opus: "Opus",
 	sonnet: "Sonnet",
 	haiku: "Haiku",
+	mythos: "Mythos",
 };
 
 export function FamilyActivationSection() {

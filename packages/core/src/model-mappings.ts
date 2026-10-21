@@ -12,16 +12,31 @@ const log = new Logger("ModelMappings");
 // Known model family patterns for O(1) direct matching
 // Pattern order: Check "fable" before "opus" before "haiku" before "sonnet" to avoid substring
 // collisions in edge cases like "claude-opus-haiku-test" (though we would never see this pattern from the client)
-export const KNOWN_PATTERNS = ["fable", "opus", "haiku", "sonnet"] as const;
+//
+// "mythos" is last because it collides with nothing, and it is here at all
+// because a family missing from this list is not merely unmapped — it is read
+// as "not a Claude id" by the account selector, which then routes the request
+// to a non-Claude provider. Measured on 2026-10-21: `claude-mythos-5-1`, which
+// the Anthropic catalog lists for a live account, reached a ChatGPT account and
+// came back as OpenAI's "model is not supported" — an upstream refusal naming
+// the wrong vendor entirely. Anthropic's own listing carries the family as
+// `line`, so a new one ships without warning; the symptom is always this.
+export const KNOWN_PATTERNS = [
+	"fable",
+	"opus",
+	"haiku",
+	"sonnet",
+	"mythos",
+] as const;
 
 /**
- * Get the model family (fable/opus/sonnet/haiku) from a model ID
+ * Get the model family (fable/opus/sonnet/haiku/mythos) from a model ID
  * Uses the same pattern matching as mapModelName()
  * @returns Model family or null if no pattern matches
  */
 export function getModelFamily(
 	modelId: string,
-): "fable" | "opus" | "sonnet" | "haiku" | null {
+): "fable" | "opus" | "sonnet" | "haiku" | "mythos" | null {
 	const normalized = modelId.toLowerCase();
 	for (const pattern of KNOWN_PATTERNS) {
 		if (normalized.includes(pattern)) {
@@ -48,7 +63,8 @@ export function weeklyScopedWindowKey(displayName: string): string {
 
 /**
  * Validate if a model ID is a valid Claude model
- * Accepts any model containing fable, opus, sonnet, or haiku (case-insensitive)
+ * Accepts any model containing fable, opus, sonnet, haiku or mythos
+ * (case-insensitive)
  * @returns true if model matches a known pattern
  */
 export function isValidClaudeModel(modelId: string): boolean {
@@ -60,7 +76,7 @@ export function isValidClaudeModel(modelId: string): boolean {
  * @returns Error message string for API responses
  */
 export function getAllowedModelsMessage(): string {
-	return "Model must contain one of: fable, opus, sonnet, haiku (e.g., claude-fable-5, claude-opus-4-6, claude-sonnet-4-5-20250929)";
+	return `Model must contain one of: ${KNOWN_PATTERNS.join(", ")} (e.g., claude-fable-5, claude-opus-4-6, claude-sonnet-4-5-20250929)`;
 }
 
 /**
@@ -371,7 +387,7 @@ export function createCustomEndpointData(
 
 /**
  * Parse model fallbacks from account's model_fallbacks field.
- * Model fallbacks map model family names (fable/opus/sonnet/haiku) to fallback model names.
+ * Model fallbacks map model family names (see KNOWN_PATTERNS) to fallback model names.
  */
 export function parseModelFallbacks(
 	modelFallbacks: string | null,
