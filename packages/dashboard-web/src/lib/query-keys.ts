@@ -56,6 +56,10 @@ export const queryKeys = {
 	// and writes everything at once.
 	providerModelDefaults: () =>
 		[...queryKeys.all, "config", "provider-model-defaults"] as const,
+	// Single record for the custom model alias map. No parameter, same reason
+	// as above: the screen reads and writes the whole map at once.
+	customModelAliases: () =>
+		[...queryKeys.all, "config", "custom-model-aliases"] as const,
 	// One key per on/off config setting, named by its endpoint path so two
 	// settings can never share a cache entry.
 	configFlag: (path: string) =>

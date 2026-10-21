@@ -4,9 +4,14 @@ export type {
 	RateLimitInfo,
 	TokenRefreshResult,
 } from "@better-ccflare/providers";
+// Re-exported through the proxy package because the server already takes its
+// Codex wiring from here, and the declared client version is part of it.
 export {
+	getCodexVersion,
 	getProvider,
+	initCodexVersionDiscovery,
 	listProviders,
+	refreshCodexVersion,
 	registerProvider,
 } from "@better-ccflare/providers";
 export {

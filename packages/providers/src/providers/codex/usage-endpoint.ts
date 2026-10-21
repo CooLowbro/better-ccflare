@@ -1,6 +1,6 @@
 import { Logger } from "@better-ccflare/logger";
 import type { CodexCredits, UsageData, UsageWindow } from "../../usage-fetcher";
-import { CODEX_USER_AGENT } from "./provider";
+import { getCodexUserAgent } from "./client-version";
 
 const log = new Logger("CodexUsageEndpoint");
 
@@ -221,7 +221,7 @@ export async function fetchCodexUsageData(
 	const headers: Record<string, string> = {
 		Authorization: `Bearer ${accessToken.trim()}`,
 		Accept: "application/json",
-		"User-Agent": CODEX_USER_AGENT,
+		"User-Agent": getCodexUserAgent(),
 		originator: "codex_cli_rs",
 	};
 	if (options.chatgptAccountId) {

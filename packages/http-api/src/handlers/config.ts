@@ -5,10 +5,13 @@ import {
 } from "@better-ccflare/config";
 import {
 	DEFAULT_AGENT_MODEL,
+	type CustomModelAliases,
+	describeAliasIdProblem,
 	KNOWN_PATTERNS,
 	NETWORK,
 	STRATEGIES,
 	type StrategyName,
+	setCustomModelAliases as setCustomModelAliasesRegistry,
 	setForceAccountModel as setForceAccountModelFlag,
 	setUseExtraUsage as setUseExtraUsageFlag,
 	TIME_CONSTANTS,
@@ -455,6 +458,70 @@ export function createConfigHandlers(
 				enabled: config.getForceAccountModel(),
 				source: config.getForceAccountModelSource(),
 			});
+		},
+
+		/**
+		 * GET /api/config/custom-model-aliases — the alias map as it stands.
+		 *
+		 * Reads the config rather than the in-memory registry so that the screen
+		 * shows what is persisted. The two agree in normal operation; when they
+		 * disagree, the config is the one that survives a restart, and that is the
+		 * answer an operator is asking for.
+		 */
+		getCustomModelAliases: (): Response => {
+			return jsonResponse({ aliases: config.getCustomModelAliases() });
+		},
+
+		/**
+		 * POST /api/config/custom-model-aliases — replace the whole alias map.
+		 *
+		 * Whole-map replacement, not a merge: a merge gives no way to delete an
+		 * alias, and an alias that cannot be deleted keeps routing traffic to a
+		 * provider the operator has stopped choosing.
+		 */
+		setCustomModelAliases: async (req: Request): Promise<Response> => {
+			const body = await req.json();
+			const raw = body?.aliases;
+			if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+				return errorResponse(
+					BadRequest(
+						"Invalid payload: expected 'aliases' to be an object mapping alias id -> { provider, model }",
+					),
+				);
+			}
+			for (const [id, entry] of Object.entries(raw)) {
+				// Only "error" blocks. A "warning" means the id is invisible to a
+				// Claude Code model picker, which is a property of that one client —
+				// refusing it here would speak for clients we do not serve.
+				const problem = describeAliasIdProblem(id);
+				if (problem?.level === "error") {
+					return errorResponse(
+						BadRequest(`Invalid alias "${id}": ${problem.message}`),
+					);
+				}
+				if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+					return errorResponse(
+						BadRequest(`Invalid alias "${id}": expected an object`),
+					);
+				}
+				const { provider, model } = entry as Record<string, unknown>;
+				if (typeof provider !== "string" || !provider.trim()) {
+					return errorResponse(
+						BadRequest(`Invalid alias "${id}": 'provider' is required`),
+					);
+				}
+				if (typeof model !== "string" || !model.trim()) {
+					return errorResponse(
+						BadRequest(`Invalid alias "${id}": 'model' is required`),
+					);
+				}
+			}
+			config.setCustomModelAliases(raw as CustomModelAliases);
+			// The effective value, after the config's own sanitization — the
+			// mirror must never claim more than the config does.
+			const effective = config.getCustomModelAliases();
+			setCustomModelAliasesRegistry(effective);
+			return jsonResponse({ success: true, aliases: effective });
 		},
 
 		setForceAccountModel: async (req: Request): Promise<Response> => {

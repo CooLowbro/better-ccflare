@@ -1,5 +1,6 @@
 import {
 	getAllowedModelsMessage,
+	isRegisteredAlias,
 	isValidClaudeModel,
 } from "@better-ccflare/core";
 import type { APIContext } from "@better-ccflare/types";
@@ -21,6 +22,10 @@ export async function isAllowedModel(
 	modelCatalog?: APIContext["modelCatalog"],
 ): Promise<boolean> {
 	if (isValidClaudeModel(model)) return true;
+	// A registered alias carries no family word and will never appear in the
+	// Anthropic catalog — both checks below would reject it. The operator put
+	// it in the config, which is a stronger statement than either.
+	if (isRegisteredAlias(model)) return true;
 	if (!modelCatalog) return false;
 	try {
 		const catalog = await modelCatalog.get();
@@ -32,5 +37,5 @@ export async function isAllowedModel(
 }
 
 export function allowedModelErrorMessage(): string {
-	return `${getAllowedModelsMessage()} — or any model id present in the live Anthropic model catalog.`;
+	return `${getAllowedModelsMessage()} — or any model id present in the live Anthropic model catalog, or a registered custom model alias.`;
 }

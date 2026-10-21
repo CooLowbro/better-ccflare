@@ -42,6 +42,7 @@ import {
 	recordXaiAffinitySuccess,
 	resolveEffectiveModel,
 	selectAccountsForRequest,
+	setAliasProvider,
 	setXaiConvId,
 	validateProviderPath,
 } from "./handlers";
@@ -322,6 +323,7 @@ async function handleProxyRequest(
 		originalModel,
 		appliedModel,
 		agentAttributionSource,
+		aliasProvider,
 	} = await interceptAndModifyRequest(
 		requestBodyContext,
 		ctx.dbOps,
@@ -372,6 +374,13 @@ async function handleProxyRequest(
 	const xaiConvId = deriveXaiConvId(requestMeta.clientSessionId);
 	if (xaiConvId) {
 		setXaiConvId(requestMeta, xaiConvId);
+	}
+
+	// Same side-channel treatment for a registered model alias: the interceptor
+	// has already swapped the alias id for the real model, so selection would
+	// otherwise have no way to know which provider was named.
+	if (aliasProvider) {
+		setAliasProvider(requestMeta, aliasProvider);
 	}
 
 	// 5b. Session volume circuit breaker: a runaway subagent storm shows up as

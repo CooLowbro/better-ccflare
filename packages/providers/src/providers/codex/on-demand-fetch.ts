@@ -1,12 +1,8 @@
 import { validateEndpointUrl } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import type { UsageData } from "../../usage-fetcher";
-import {
-	CODEX_DEFAULT_ENDPOINT,
-	CODEX_PING_MODEL,
-	CODEX_USER_AGENT,
-	CODEX_VERSION,
-} from "./provider";
+import { getCodexUserAgent, getCodexVersion } from "./client-version";
+import { CODEX_DEFAULT_ENDPOINT, CODEX_PING_MODEL } from "./provider";
 import { parseCodexUsageHeaders } from "./usage";
 
 const log = new Logger("CodexOnDemandFetch");
@@ -124,9 +120,9 @@ export async function fetchCodexUsageOnDemand(
 			headers: {
 				Authorization: `Bearer ${accessToken}`,
 				"Content-Type": "application/json",
-				Version: CODEX_VERSION,
+				Version: getCodexVersion(),
 				"Openai-Beta": "responses=experimental",
-				"User-Agent": CODEX_USER_AGENT,
+				"User-Agent": getCodexUserAgent(),
 				originator: "codex_cli_rs",
 				Accept: "text/event-stream",
 			},

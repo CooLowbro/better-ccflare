@@ -18,7 +18,8 @@ import {
 import { isInternalProbe, type ProxyContext } from "./handlers";
 import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
-import { ingestModelsListing } from "./model-catalog";
+import { getModelCatalog, ingestModelsListing } from "./model-catalog";
+import { mergeModelsListingStream } from "./models-listing-merge";
 import {
 	rewriteAnthropicMessageJsonModelStream,
 	rewriteAnthropicMessageSseModel,
@@ -569,8 +570,30 @@ export async function forwardToClient(
 			false);
 	// As with SSE above, this transform is downstream of analytics so logs,
 	// pricing and usage retain the provider's real response model.
-	const clientBody =
-		isAnthropicMessagesJsonResponse && originalModel
+	// A successful model listing gets the registered aliases and the cached
+	// Anthropic catalog appended. Downstream of the tee above on purpose: the
+	// passive catalog capture must keep ingesting the provider's real listing,
+	// not one this process just added to itself.
+	const isModelsListingResponse =
+		method === "GET" &&
+		path === "/v1/models" &&
+		response.ok &&
+		(response.headers
+			.get("content-type")
+			?.toLowerCase()
+			.includes("application/json") ??
+			false);
+
+	const clientBody = isModelsListingResponse
+		? mergeModelsListingStream(passthroughBody, async () => {
+				const catalog = await getModelCatalog();
+				// Only a live catalog may widen a listing. The bundled fallback is
+				// a guess about what exists, and a guess presented in a listing is
+				// indistinguishable from an entitlement.
+				if (catalog.source !== "live") return {};
+				return { catalogEntries: catalog.models };
+			})
+		: isAnthropicMessagesJsonResponse && originalModel
 			? rewriteAnthropicMessageJsonModelStream(passthroughBody, originalModel)
 			: passthroughBody;
 

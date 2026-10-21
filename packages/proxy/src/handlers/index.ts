@@ -3,6 +3,7 @@ export {
 	type RequestJsonBody,
 } from "../request-body-context";
 export {
+	getAliasProvider,
 	getComboSlotInfo,
 	getModelFamilyExhaustionInfo,
 	getXaiConvId,
@@ -12,6 +13,7 @@ export {
 	recordXaiAffinitySuccess,
 	resolveEffectiveModel,
 	selectAccountsForRequest,
+	setAliasProvider,
 	setComboSlotInfo,
 	setModelFamilyExhaustionInfo,
 	setXaiConvId,

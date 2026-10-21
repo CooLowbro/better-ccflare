@@ -1,5 +1,6 @@
 import {
 	listCatalogueModels,
+	listModelAliases,
 	validateApiKey,
 	validateEndpointUrl,
 } from "@better-ccflare/core";
@@ -33,7 +34,16 @@ export type ModelListingSource =
 	 * tell an entitled model from one the plan does not reach — which is the
 	 * distinction that matters when the choice ends up in a request.
 	 */
-	| "account";
+	| "account"
+	/**
+	 * A registered custom model alias. Says the operator declared this id and
+	 * what it resolves to — and says nothing at all about entitlement, exactly
+	 * like "reference": the alias target still has to be serveable by some
+	 * account of the provider the alias names. Never collapse it into
+	 * "account" or "catalog", which are claims about a provider, not about
+	 * local configuration.
+	 */
+	| "alias";
 
 export interface ProviderModelEntry {
 	id: string;
@@ -75,10 +85,11 @@ function isAnthropicProvider(provider: string): boolean {
  * GET /api/models[?provider=<name>] — list the models available for one
  * provider, each entry tagged with where the knowledge came from.
  *
- * Without `provider` (and for the Anthropic providers) the body is exactly
- * what this endpoint has always returned — the cached live catalog, or the
- * bundled static fallback — so existing callers keep working; `provider` and
- * the per-entry `source` are purely additive fields.
+ * Without `provider` (and for the Anthropic providers) the body is what this
+ * endpoint has always returned — the cached live catalog, or the bundled
+ * static fallback — plus any registered custom model alias, tagged
+ * `source: "alias"`. `provider` and the per-entry `source` are additive
+ * fields, and an alias never displaces a catalog entry.
  *
  * For every other provider the answer is the union of what ccflare knows
  * built in and what the public models.dev catalogue lists, deduplicated by
@@ -138,6 +149,19 @@ export function createModelsHandler(context: APIContext) {
 			}
 		}
 
+		// Registered aliases, rendered in this endpoint's vocabulary. Appended
+		// to whichever branch answers below rather than replacing anything: an
+		// alias is additional knowledge, never a correction of the provider's.
+		const aliasEntries: ProviderModelEntry[] = Object.entries(
+			listModelAliases(),
+		)
+			.filter(([, alias]) => !requested || alias.provider === requested)
+			.map(([id, alias]) => ({
+				id,
+				displayName: alias.displayName ?? id,
+				source: "alias" as const,
+			}));
+
 		if (requested === "" || isAnthropicProvider(requested)) {
 			if (!context.modelCatalog) {
 				return errorResponse("Model catalog is not available");
@@ -150,11 +174,14 @@ export function createModelsHandler(context: APIContext) {
 			return jsonResponse({
 				provider: requested || "anthropic",
 				models: live
-					? catalog.models.map((model) => ({
-							...model,
-							source: "catalog" as const,
-						}))
-					: [],
+					? [
+							...catalog.models.map((model) => ({
+								...model,
+								source: "catalog" as const,
+							})),
+							...aliasEntries,
+						]
+					: aliasEntries,
 				fetchedAt: catalog.fetchedAt,
 				source: live ? "live" : "unavailable",
 				...(live
@@ -191,7 +218,14 @@ export function createModelsHandler(context: APIContext) {
 		const referenceEntries = Array.from(referenceById.values()).sort((a, b) =>
 			a.id.localeCompare(b.id),
 		);
-		const models = [...builtinById.values(), ...referenceEntries];
+		// Aliases sit between builtin and reference: the operator declared them
+		// explicitly, which outranks a public catalogue's say-so, but they are
+		// still not the provider's own word about entitlement.
+		const models = [
+			...builtinById.values(),
+			...aliasEntries,
+			...referenceEntries,
+		];
 
 		const hasBuiltin = builtinById.size > 0;
 		const hasReference = referenceEntries.length > 0;
@@ -201,7 +235,9 @@ export function createModelsHandler(context: APIContext) {
 				: "builtin"
 			: hasReference
 				? "reference"
-				: "unavailable";
+				: aliasEntries.length > 0
+					? "alias"
+					: "unavailable";
 
 		return jsonResponse({
 			provider: requested,

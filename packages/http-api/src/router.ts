@@ -490,6 +490,12 @@ export class APIRouter {
 		this.handlers.set("POST:/api/config/use-extra-usage", (req) =>
 			configHandlers.setUseExtraUsage(req),
 		);
+		this.handlers.set("GET:/api/config/custom-model-aliases", () =>
+			configHandlers.getCustomModelAliases(),
+		);
+		this.handlers.set("POST:/api/config/custom-model-aliases", (req) =>
+			configHandlers.setCustomModelAliases(req),
+		);
 		this.handlers.set("POST:/api/maintenance/cleanup", () => cleanupHandler());
 		this.handlers.set("GET:/api/system/info", () => systemInfoHandler());
 		this.handlers.set("GET:/api/version/check", () => versionCheckHandler());

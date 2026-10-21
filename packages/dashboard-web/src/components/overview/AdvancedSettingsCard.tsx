@@ -8,6 +8,7 @@ import {
 } from "../ui/card";
 import { Separator } from "../ui/separator";
 import { ConfigFlagDialog } from "./ConfigFlagDialog";
+import { CustomModelAliasesDialog } from "./CustomModelAliasesDialog";
 import { ProviderModelDefaultsDialog } from "./ProviderModelDefaultsDialog";
 
 /**
@@ -34,6 +35,13 @@ const ADVANCED_SETTINGS_ITEMS: AdvancedSettingItem[] = [
 		description:
 			"Built-in fallback model per provider and Claude family, used only as a last resort.",
 		dialog: <ProviderModelDefaultsDialog />,
+	},
+	{
+		id: "custom-model-aliases",
+		title: "Custom Model Aliases",
+		description:
+			"A model id clients may ask for, standing for a real model on a named provider.",
+		dialog: <CustomModelAliasesDialog />,
 	},
 	{
 		id: "combo-session-fallback",

@@ -17,7 +17,10 @@ import type {
 	ComboSlotInfo,
 	RequestMeta,
 } from "@better-ccflare/types";
-import { getKnownCodexModels } from "../codex-model-catalog";
+import {
+	getKnownCodexModels,
+	refreshCodexModelsForMissing,
+} from "../codex-model-catalog";
 import {
 	type FamilyExhaustionOrigin,
 	getFamilyExhaustionOrigin,
@@ -111,6 +114,29 @@ export function setXaiConvId(meta: RequestMeta, convId: string): void {
 /** Retrieve the derived xAI conversation id from a RequestMeta (null if not set). */
 export function getXaiConvId(meta: RequestMeta): string | null {
 	return xaiConvIdMap.get(meta) ?? null;
+}
+
+// ── Registered model alias: the provider that must serve this request ──────
+//
+// Same WeakMap treatment as the two above, and for the same reason. Set by
+// proxy.ts when the interceptor resolved the client's model id through a
+// registered alias (see core/src/model-aliases.ts); read only by the
+// candidate filter below.
+//
+// This cannot be recovered from the model name later: by the time selection
+// runs, the alias has already been replaced by the real model id, and two
+// aliases may point at the same model on different providers. The alias is
+// the only place the provider was ever stated, so it has to be carried.
+const aliasProviderMap = new WeakMap<RequestMeta, string>();
+
+/** Record that this request arrived through an alias served by `provider`. */
+export function setAliasProvider(meta: RequestMeta, provider: string): void {
+	aliasProviderMap.set(meta, provider);
+}
+
+/** The alias provider for this request, or null when no alias was involved. */
+export function getAliasProvider(meta: RequestMeta): string | null {
+	return aliasProviderMap.get(meta) ?? null;
 }
 
 /**
@@ -309,9 +335,72 @@ function accountServesModel(account: Account, model: string): boolean {
 	if (known) {
 		return known.models.some((entry) => entry.id === model);
 	}
+	return accountNamespaceAllowsModel(account, model);
+}
+
+/**
+ * Rule 2 above on its own: whether the id could travel to this provider
+ * untranslated, judging by namespace and nothing else.
+ */
+function accountNamespaceAllowsModel(account: Account, model: string): boolean {
 	return (
 		providerAcceptsClientModel(account.provider) === isClaudeModelId(model)
 	);
+}
+
+/**
+ * Which of `candidates` may be handed `model` under "force account model".
+ *
+ * A listing is evidence, not a census. Measured against a live account on
+ * 2026-10-05: `gpt-6.1-sol` is absent from `/backend-api/codex/models` while
+ * the very same token runs it to completion on `/backend-api/codex/responses`.
+ * Reading the listing as a verdict therefore turns a model the account does
+ * serve into a 503 this gateway invented, worded as if an upstream had refused
+ * — when no upstream was ever asked.
+ *
+ * So a listing still narrows the field whenever it knows the model, and a miss
+ * is escalated rather than answered:
+ *
+ * 1. nobody lists it — re-read the listings live, since a model newer than our
+ *    copy is indistinguishable from one that does not exist, and ask again;
+ * 2. still nobody — fall back to the namespace rule and let the request go, so
+ *    the verdict comes from the provider, the only party that actually knows.
+ *
+ * Step 2 keeps the promise this setting makes: the model is never renamed, and
+ * no substitute is served. The request leaves as written, and an upstream 400
+ * naming the real reason is a better answer than a local refusal that cannot.
+ *
+ * `degraded` reports that step 2 ran, so the caller can say so out loud: a
+ * request going out under a listing that disclaims it deserves a line in the
+ * log however it ends.
+ */
+async function accountsThatCanServe(
+	candidates: Account[],
+	model: string,
+	ctx: ProxyContext,
+): Promise<{ kept: Account[]; degraded: boolean }> {
+	const listed = candidates.filter((account) =>
+		accountServesModel(account, model),
+	);
+	if (listed.length > 0 || candidates.length === 0) {
+		return { kept: listed, degraded: false };
+	}
+
+	if (await refreshCodexModelsForMissing(candidates, model, ctx)) {
+		const afterRefresh = candidates.filter((account) =>
+			accountServesModel(account, model),
+		);
+		if (afterRefresh.length > 0) {
+			return { kept: afterRefresh, degraded: false };
+		}
+	}
+
+	return {
+		kept: candidates.filter((account) =>
+			accountNamespaceAllowsModel(account, model),
+		),
+		degraded: true,
+	};
 }
 
 function isClaudeModelId(model: string): boolean {
@@ -526,6 +615,11 @@ export async function selectAccountsForRequest(
 					// With "force account model" on, a header naming an account
 					// does not get to skip the one rule the setting exists for.
 					//
+					// What counts as "cannot serve" is accountsThatCanServe's to
+					// decide, so a listing that merely fails to mention the model
+					// escalates there rather than refusing here. By the time this
+					// reads empty, the id cannot travel to that provider at all.
+					//
 					// Refusing here — an empty selection, which proxy.ts answers
 					// as force_account_model_no_account — is deliberately not the
 					// same as falling through to normal selection below: that
@@ -554,13 +648,19 @@ export async function selectAccountsForRequest(
 					if (
 						model &&
 						isForceAccountModelEnabled(ctx) &&
-						!isInternalProbe(meta.headers, ctx) &&
-						!accountServesModel(forcedAccount, model)
+						!isInternalProbe(meta.headers, ctx)
 					) {
-						log.warn(
-							`Force account model: forced account ${forcedAccount.name} cannot serve "${model}" as requested — refusing rather than substituting the account or the model`,
+						const { kept } = await accountsThatCanServe(
+							[forcedAccount],
+							model,
+							ctx,
 						);
-						return [];
+						if (kept.length === 0) {
+							log.warn(
+								`Force account model: forced account ${forcedAccount.name} cannot serve "${model}" as requested — refusing rather than substituting the account or the model`,
+							);
+							return [];
+						}
 					}
 
 					// The auto-refresh scheduler sends dummy messages with x-better-ccflare-bypass-session
@@ -859,17 +959,49 @@ export async function selectAccountsForRequest(
 
 	// "Force account model": keep only accounts that can serve the requested
 	// model as written. Nothing downstream will rename it, so an account that
-	// would need a translation is not a candidate — and if that empties the
-	// list, the request fails rather than being served a model nobody asked
-	// for. Switching accounts is still fine; switching models is not.
+	// would need a translation is not a candidate. Switching accounts is still
+	// fine; switching models is not.
+	//
+	// Emptying the list is reserved for a provider mismatch, which is knowable
+	// here. "No listing mentions it" is not that — see accountsThatCanServe.
 	if (model && isForceAccountModelEnabled(ctx)) {
 		const before = orderedAccounts.length;
-		orderedAccounts = orderedAccounts.filter((account) =>
-			accountServesModel(account, model),
+		const { kept, degraded } = await accountsThatCanServe(
+			orderedAccounts,
+			model,
+			ctx,
 		);
+		orderedAccounts = kept;
+		if (degraded && kept.length > 0) {
+			log.warn(
+				`Force account model: no account lists "${model}" and a live refresh did not find it either — letting ${kept.length} account(s) on a matching provider try, so the answer comes from the provider rather than from here`,
+			);
+		}
 		if (orderedAccounts.length !== before) {
 			log.info(
 				`Force account model: ${orderedAccounts.length}/${before} account(s) can serve "${model}" as requested`,
+			);
+		}
+	}
+
+	// Registered alias: keep only accounts of the provider the alias names.
+	//
+	// The model id reaching this point is the real one (`gpt-5.6-sol`), because
+	// the interceptor already resolved the alias. Without this filter an
+	// Anthropic account could win the ordering and be handed a model id it has
+	// never heard of — the alias would "work" right up to an upstream 400.
+	// Emptying the list is the correct outcome when no account of that provider
+	// is available: the operator named a provider, and serving the request from
+	// a different one is the substitution aliases exist to avoid.
+	const aliasProvider = getAliasProvider(meta);
+	if (aliasProvider) {
+		const before = orderedAccounts.length;
+		orderedAccounts = orderedAccounts.filter(
+			(account) => account.provider === aliasProvider,
+		);
+		if (orderedAccounts.length !== before) {
+			log.info(
+				`Model alias: ${orderedAccounts.length}/${before} account(s) on provider "${aliasProvider}" can serve "${model}"`,
 			);
 		}
 	}

@@ -50,7 +50,7 @@ export {
 	CODEX_MODEL_CONTEXT_WINDOWS,
 	CODEX_PING_MODEL,
 	CODEX_USAGE_ENDPOINT,
-	CODEX_VERSION,
+	CODEX_VERSION_FLOOR,
 	CodexOAuthProvider,
 	CodexProvider,
 	carryForwardCodexCredits,
@@ -58,11 +58,16 @@ export {
 	extractChatgptAccountId,
 	fetchCodexUsageData,
 	fetchCodexUsageOnDemand,
+	getCodexUserAgent,
+	getCodexVersion,
+	initCodexVersionDiscovery,
 	isCodexSubscriptionEndpoint,
 	parseCodexUsageHeaders,
 	parseCodexUsagePayload,
 	pickCodexRolloverSlot,
 	readCodexPlanType,
+	refreshCodexVersion,
+	setDiscoveredCodexVersionForTests,
 } from "./codex/index";
 export { KiloProvider } from "./kilo/index";
 export {

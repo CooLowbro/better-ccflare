@@ -1,6 +1,6 @@
 import { Logger } from "@better-ccflare/logger";
 import {
-	CODEX_VERSION,
+	getCodexVersion,
 	hasDerivedProviderModelDefaults,
 	setDerivedProviderModelDefaults,
 } from "@better-ccflare/providers";
@@ -99,10 +99,30 @@ export function getKnownCodexModels(
 	return own ? { ...own, source: "cached" } : null;
 }
 
-/** Test seam: both registries are process-wide and leak between cases. */
+/**
+ * Models a live read has already shown to be absent from every account, and
+ * when that was established.
+ *
+ * A listing is ~550 KB per account, and a client retrying a model nobody lists
+ * would otherwise turn each attempt into a fresh download per account —
+ * measured: one agent retried a single missing model 203 times in 72 hours.
+ * Remembering a confirmed absence bounds that to one refresh per model per
+ * window.
+ *
+ * Keyed by model and not by account on purpose: the question being suppressed
+ * is "has anyone started serving this yet?", which is answered once for the
+ * whole pool.
+ */
+const confirmedAbsentAt = new Map<string, number>();
+
+/** How long a confirmed absence suppresses another live read of that model. */
+const ABSENCE_TTL_MS = 10 * 60_000;
+
+/** Test seam: all three registries are process-wide and leak between cases. */
 export function clearCodexModelCacheForTests(): void {
 	lastGood.clear();
 	providerWide = null;
+	confirmedAbsentAt.clear();
 }
 
 /**
@@ -202,7 +222,7 @@ async function fetchLive(
 	const accessToken = await getValidAccessToken(account, ctx);
 	if (!accessToken) throw new Error("no access token for this account");
 
-	const url = `https://chatgpt.com/backend-api/codex/models?client_version=${encodeURIComponent(CODEX_VERSION)}`;
+	const url = `https://chatgpt.com/backend-api/codex/models?client_version=${encodeURIComponent(getCodexVersion())}`;
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 	try {
@@ -215,7 +235,7 @@ async function fetchLive(
 				// identifies the caller by originator — mirroring the CLI keeps us
 				// on the path OpenAI actually serves.
 				originator: "codex_cli_rs",
-				"user-agent": `codex_cli_rs/${CODEX_VERSION}`,
+				"user-agent": `codex_cli_rs/${getCodexVersion()}`,
 			},
 			signal: controller.signal,
 		});
@@ -300,6 +320,59 @@ export function lowestTierCodexModel(
 ): string | null {
 	const models = listing?.models ?? [];
 	return models.length > 0 ? models[models.length - 1].id : null;
+}
+
+/**
+ * Re-read every Codex account's listing because `model` is absent from all of
+ * them, and tell the caller whether looking again is worth it.
+ *
+ * Exists for the one case a cache cannot distinguish on its own: a model
+ * published after our last read looks exactly like a model that does not
+ * exist. A live read separates them — but only once per model per window, or a
+ * client retrying a genuinely unknown model pays for a full re-download of
+ * every listing on every attempt.
+ *
+ * `false` means nothing was re-read, so re-running the same check would reach
+ * the same answer. Never throws: an account that cannot answer must not stop
+ * the others from being asked, since the one that answers may be the one that
+ * lists it.
+ */
+export async function refreshCodexModelsForMissing(
+	accounts: Account[],
+	model: string,
+	ctx: ProxyContext,
+): Promise<boolean> {
+	const codexAccounts = accounts.filter(
+		(account) => account.provider === "codex",
+	);
+	if (codexAccounts.length === 0) return false;
+
+	const confirmedAt = confirmedAbsentAt.get(model);
+	if (confirmedAt !== undefined && Date.now() - confirmedAt < ABSENCE_TTL_MS) {
+		return false;
+	}
+
+	const listings = await Promise.all(
+		codexAccounts.map((account) =>
+			getCodexModels(account.id, ctx).catch((error) => {
+				log.debug(`Refreshing the list for ${account.name} failed: ${error}`);
+				return null;
+			}),
+		),
+	);
+
+	const found = listings.some((listing) =>
+		listing?.models.some((entry) => entry.id === model),
+	);
+	if (found) {
+		confirmedAbsentAt.delete(model);
+		log.info(
+			`A live read found "${model}", which was missing from the cached listings`,
+		);
+	} else {
+		confirmedAbsentAt.set(model, Date.now());
+	}
+	return true;
 }
 
 /**
