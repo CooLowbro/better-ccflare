@@ -357,6 +357,18 @@ function accountServesModel(account: Account, model: string): boolean {
  * to at whichever account the strategy picked — and the account that does not
  * have it answers 404.
  */
+/**
+ * Whether this account's OWN listing names the model — first-hand evidence,
+ * as opposed to the absence of a contradiction.
+ *
+ * False both for "its listing omits the model" and for "no listing has been
+ * read": the two are different facts, and only the caller knows which one
+ * matters. `accountServesModel` is where they are told apart.
+ */
+function listingConfirms(account: Account, model: string): boolean {
+	return knownModelsFor(account)?.includes(model) ?? false;
+}
+
 function knownModelsFor(account: Account): string[] | null {
 	if (account.provider === "codex") {
 		const listing = getKnownCodexModels(account.id);
@@ -410,6 +422,26 @@ async function accountsThatCanServe(
 	model: string,
 	ctx: ProxyContext,
 ): Promise<{ kept: Account[]; degraded: boolean }> {
+	// First-hand confirmations outrank accounts we simply know nothing about.
+	// Both pass `accountServesModel` — one because its own listing names the
+	// model, the other because nothing contradicts the namespace — and treating
+	// them as equal is what let a measured failure through on 2026-10-21: a
+	// request for `claude-mythos-5-1` reached the account that lists it, hit a
+	// 429, failed over to the Claude account whose listing had not been read
+	// yet, and came back `not_found_error`. The client is then told the model
+	// does not exist, by an account that was never entitled to it, while the
+	// account that is sits one rung up the list.
+	//
+	// So evidence promotes, and the lack of it still does not exclude: an
+	// account with no listing stays a candidate whenever nobody confirms the
+	// model, which is the fail-open this whole function is built around.
+	const confirmed = candidates.filter((account) =>
+		listingConfirms(account, model),
+	);
+	if (confirmed.length > 0) {
+		return { kept: confirmed, degraded: false };
+	}
+
 	const listed = candidates.filter((account) =>
 		accountServesModel(account, model),
 	);
@@ -433,6 +465,14 @@ async function accountsThatCanServe(
 		])
 	).some(Boolean);
 	if (refreshed) {
+		// Same order of evidence as above: a fresh listing that names the model
+		// settles it, and only then does "nothing contradicts it" count.
+		const confirmedNow = candidates.filter((account) =>
+			listingConfirms(account, model),
+		);
+		if (confirmedNow.length > 0) {
+			return { kept: confirmedNow, degraded: false };
+		}
 		const afterRefresh = candidates.filter((account) =>
 			accountServesModel(account, model),
 		);

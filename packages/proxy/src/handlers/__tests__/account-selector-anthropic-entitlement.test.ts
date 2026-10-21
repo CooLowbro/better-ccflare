@@ -156,6 +156,27 @@ describe("force account model — Claude accounts with different entitlements", 
 		expect(fetchCalls).toBe(0);
 	});
 
+	it("prefers the account that lists it over one never read", async () => {
+		const ctx = makeCtx([withMythos, withoutMythos]);
+		// Only the first account has ever answered — the second is simply
+		// unknown, not known to lack the model.
+		await getAnthropicModels(withMythos.id, ctx);
+		fetchCalls = 0;
+
+		const result = await selectAccountsForRequest(
+			makeRequestMeta(),
+			ctx,
+			"claude-mythos-5-1",
+		);
+
+		// Measured failure this guards: treating "unknown" as good as
+		// "confirmed" let a 429 on the entitled account fail over to the one
+		// that answers not_found_error, so the client was told the model does
+		// not exist by an account that never had it.
+		expect(result.map((a) => a.id)).toEqual(["anthropic-1"]);
+		expect(fetchCalls).toBe(0);
+	});
+
 	it("keeps both accounts for a model both of them list", async () => {
 		const ctx = makeCtx([withMythos, withoutMythos]);
 		await primeListings(ctx, [withMythos, withoutMythos]);
