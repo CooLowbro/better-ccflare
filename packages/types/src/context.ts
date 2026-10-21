@@ -104,6 +104,38 @@ export interface APIContext {
 			fetchedAt: number;
 			source: "live" | "cached";
 		} | null>;
+		/**
+		 * Models one Anthropic account can actually call, read from that
+		 * account's own `/v1/models`. Null when the account is unknown, is not
+		 * an Anthropic account, or none has ever been read.
+		 *
+		 * Separate from `get()` above for the reason this whole field exists:
+		 * `get()` answers "what exists at Anthropic" with one list for the
+		 * gateway, and two accounts of the same gateway were measured on
+		 * 2026-10-21 to be entitled to different models. Never borrowed between
+		 * accounts — that difference is the thing being reported.
+		 */
+		anthropicModels?: (accountId: string) => Promise<{
+			models: Array<{
+				id: string;
+				displayName: string;
+				createdAt: string | null;
+				line?: string | null;
+			}>;
+			fetchedAt: number;
+			source: "live" | "cached";
+		} | null>;
+		/**
+		 * Every model at least one Anthropic account in the pool has listed for
+		 * itself — the union, which is what the gateway as a whole can serve.
+		 * Empty when no account has ever answered.
+		 */
+		anthropicUnion?: () => Array<{
+			id: string;
+			displayName: string;
+			createdAt: string | null;
+			line?: string | null;
+		}>;
 	};
 	/**
 	 * Process-local secret gating internal-probe requests (auto-refresh /

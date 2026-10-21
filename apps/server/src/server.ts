@@ -69,12 +69,14 @@ import {
 	drainUsageCollector,
 	earliestCodexResetMs,
 	forceCloseCircuit,
+	getAnthropicModels,
 	getCodexModels,
 	getModelCatalog,
 	getOpenAICompatibleModels,
 	getUsageCollectorHealth,
 	getValidAccessToken,
 	handleProxy,
+	initAnthropicModelCatalog,
 	initCodexVersionDiscovery,
 	initModelCatalogRefresh,
 	initProxy,
@@ -90,6 +92,7 @@ import {
 	startIntegrityScheduler,
 	startWalTruncateJob,
 	stopGlobalTokenHealthChecks,
+	unionOfKnownAnthropicModels,
 	unregisterAutoRefreshTrackingClearer,
 	unregisterCodexUsageRefresher,
 	unregisterPollingRestarter,
@@ -1565,6 +1568,11 @@ export default async function startServer(options?: {
 				if (!modelCatalogProxyContext) return null;
 				return getOpenAICompatibleModels(accountId, modelCatalogProxyContext);
 			},
+			anthropicModels: async (accountId: string) => {
+				if (!modelCatalogProxyContext) return null;
+				return getAnthropicModels(accountId, modelCatalogProxyContext);
+			},
+			anthropicUnion: () => unionOfKnownAnthropicModels(),
 			refresh: async () => {
 				if (!modelCatalogProxyContext) {
 					return {
@@ -2346,6 +2354,13 @@ Available endpoints:
 	// 30-120s delay, then re-checks every 15 minutes whether a refresh is due,
 	// rather than a single long-lived interval timer).
 	stopModelCatalogRefreshJob = initModelCatalogRefresh(proxyContext);
+
+	// Load the per-account listings persisted by a previous run. Separate from
+	// the catalog above because it answers a different question — what each
+	// account may call, rather than what exists — and routing consults it
+	// synchronously, so it has to be in memory before the first request rather
+	// than fetched on the way through.
+	void initAnthropicModelCatalog();
 
 	// Follow the Codex CLI's own releases. OpenAI serves both the model
 	// catalogue and the execution endpoint according to the client version we

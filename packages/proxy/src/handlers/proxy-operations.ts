@@ -32,6 +32,7 @@ import type {
 	RateLimitReason,
 	RequestMeta,
 } from "@better-ccflare/types";
+import { ensureAnthropicModelListing } from "../anthropic-model-catalog";
 import { cacheBodyStore } from "../cache-body-store";
 import { ensureCodexModelDefaults } from "../codex-model-catalog";
 import { extractGatewayHintHeadersFromRequest } from "../gateway-hint-headers";
@@ -1309,6 +1310,11 @@ export async function proxyWithAccount(
 		// is arbitrary, so guessing sonnet/haiku from list position is not a
 		// call this proxy makes), so warming them here would only add latency.
 		await ensureCodexModelDefaults(account, ctx);
+
+		// The Anthropic equivalent, and pointedly not awaited: this listing does
+		// not shape the request in hand, it decides which account the NEXT one
+		// may go to. See ensureAnthropicModelListing.
+		ensureAnthropicModelListing(account, ctx);
 
 		const initialTransformedRequest =
 			await transformRequestForAccount(providerRequest);

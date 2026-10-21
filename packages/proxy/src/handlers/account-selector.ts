@@ -18,6 +18,11 @@ import type {
 	RequestMeta,
 } from "@better-ccflare/types";
 import {
+	getKnownAnthropicModels,
+	isAnthropicAccount,
+	refreshAnthropicModelsForMissing,
+} from "../anthropic-model-catalog";
+import {
 	getKnownCodexModels,
 	refreshCodexModelsForMissing,
 } from "../codex-model-catalog";
@@ -322,20 +327,46 @@ export function isForceAccountModelEnabled(ctx: ProxyContext): boolean {
  *    to a provider that speaks Claude ids, and a non-Claude id only to one
  *    that does not.
  *
- * Rule 2 carries the weight in practice: listings are per-process and start
+ * Rule 2 still carries real weight: a Codex listing is per-process and starts
  * empty after every restart, and some accounts answer 401 on the listing
  * endpoint while serving traffic perfectly. It is coarse — with several
  * non-Claude providers configured, a request can still reach the wrong one —
  * but the failure is then an explicit upstream error, never a silent
  * substitution, which is the promise this setting actually makes.
+ *
+ * Rule 1 reaches further than it used to: Anthropic listings survive a restart
+ * on disk, so a pool of Claude accounts with different entitlements is
+ * separated by rule 1 rather than lumped together by rule 2 — which is the
+ * whole reason it is worth keeping them.
  */
 function accountServesModel(account: Account, model: string): boolean {
-	const known =
-		account.provider === "codex" ? getKnownCodexModels(account.id) : null;
+	const known = knownModelsFor(account);
 	if (known) {
-		return known.models.some((entry) => entry.id === model);
+		return known.some((id) => id === model);
 	}
 	return accountNamespaceAllowsModel(account, model);
+}
+
+/**
+ * The ids this account has listed for itself, or null when it never has.
+ *
+ * Both providers that can answer for themselves are asked here. Anthropic
+ * joined the list on 2026-10-21, when two accounts of one gateway were
+ * measured to differ: the namespace rule alone says "it is a Claude id, any
+ * Claude account will do", which sends a model only one account is entitled
+ * to at whichever account the strategy picked — and the account that does not
+ * have it answers 404.
+ */
+function knownModelsFor(account: Account): string[] | null {
+	if (account.provider === "codex") {
+		const listing = getKnownCodexModels(account.id);
+		return listing ? listing.models.map((entry) => entry.id) : null;
+	}
+	if (isAnthropicAccount(account)) {
+		const listing = getKnownAnthropicModels(account.id);
+		return listing ? listing.models.map((entry) => entry.id) : null;
+	}
+	return null;
 }
 
 /**
@@ -386,7 +417,22 @@ async function accountsThatCanServe(
 		return { kept: listed, degraded: false };
 	}
 
-	if (await refreshCodexModelsForMissing(candidates, model, ctx)) {
+	// Only the side the id could belong to is re-read. A listing that cannot
+	// contain the id answers nothing, and these reads are expensive enough
+	// (~550 KB for a Codex account) that spending one to confirm the obvious is
+	// the behaviour the suppression below exists to prevent.
+	const mayBeAnthropic = isClaudeModelId(model);
+	const refreshed = (
+		await Promise.all([
+			mayBeAnthropic
+				? Promise.resolve(false)
+				: refreshCodexModelsForMissing(candidates, model, ctx),
+			mayBeAnthropic
+				? refreshAnthropicModelsForMissing(candidates, model, ctx)
+				: Promise.resolve(false),
+		])
+	).some(Boolean);
+	if (refreshed) {
 		const afterRefresh = candidates.filter((account) =>
 			accountServesModel(account, model),
 		);
@@ -403,8 +449,26 @@ async function accountsThatCanServe(
 	};
 }
 
+/**
+ * Whether this id belongs to Anthropic's namespace at all.
+ *
+ * Wider than the family table on purpose. A family ccflare has not been taught
+ * yet is exactly the case that fails silently: `getModelFamily` returns null,
+ * the id reads as "not Anthropic's", and the request leaves for whichever
+ * other provider is configured. Measured on 2026-10-21, before `mythos` was
+ * added to the table: `claude-mythos-5-1` — listed by a live Anthropic account
+ * — reached a ChatGPT account and came back as OpenAI explaining that it does
+ * not serve that model.
+ *
+ * The vendor prefix is the durable half of the answer: Anthropic names every
+ * model `claude-*`, families come and go, and ccflare learns of a new one only
+ * when someone edits KNOWN_PATTERNS. Reading the prefix means the next family
+ * is routed to the right vendor the day it ships, and only the things that
+ * genuinely need the family — effort ranges, combo assignment, translation to
+ * another vendor's model — wait for the table to catch up.
+ */
 function isClaudeModelId(model: string): boolean {
-	return getModelFamily(model) !== null;
+	return getModelFamily(model) !== null || /^claude[-.]/i.test(model.trim());
 }
 
 /**

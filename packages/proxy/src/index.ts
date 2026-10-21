@@ -14,6 +14,14 @@ export {
 	refreshCodexVersion,
 	registerProvider,
 } from "@better-ccflare/providers";
+export type { AnthropicModelListing } from "./anthropic-model-catalog";
+export {
+	clearAnthropicModelCacheForAccount,
+	getAllKnownAnthropicListings,
+	getAnthropicModels,
+	initAnthropicModelCatalog,
+	unionOfKnownAnthropicModels,
+} from "./anthropic-model-catalog";
 export {
 	AutoRefreshScheduler,
 	getPeakHoursState,

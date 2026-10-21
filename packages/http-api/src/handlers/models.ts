@@ -149,6 +149,28 @@ export function createModelsHandler(context: APIContext) {
 			}
 		}
 
+		// And the same question asked of an Anthropic account. It belongs with
+		// the two above rather than with the catalog branch below, because the
+		// distinction that matters here is the one they share: what the account
+		// may call, not what the vendor publishes.
+		if (accountId && context.modelCatalog?.anthropicModels) {
+			const listing = await context.modelCatalog.anthropicModels(accountId);
+			if (listing) {
+				return jsonResponse({
+					provider: requested || "anthropic",
+					models: listing.models.map((model) => ({
+						id: model.id,
+						displayName: model.displayName,
+						source: "account" as const,
+						createdAt: model.createdAt,
+						line: model.line ?? null,
+					})),
+					fetchedAt: listing.fetchedAt,
+					source: listing.source,
+				});
+			}
+		}
+
 		// Registered aliases, rendered in this endpoint's vocabulary. Appended
 		// to whichever branch answers below rather than replacing anything: an
 		// alias is additional knowledge, never a correction of the provider's.
@@ -166,6 +188,27 @@ export function createModelsHandler(context: APIContext) {
 			if (!context.modelCatalog) {
 				return errorResponse("Model catalog is not available");
 			}
+
+			// What the pool's own accounts have listed, when any of them has.
+			// Preferred over the gateway-wide catalog for the reason the catalog
+			// cannot address: it is read from one eligible account and presented
+			// as the gateway's, so it both hides models only another account can
+			// call and offers models no account can.
+			const union = context.modelCatalog.anthropicUnion?.() ?? [];
+			if (union.length > 0) {
+				return jsonResponse({
+					provider: requested || "anthropic",
+					models: [
+						...union.map((model) => ({
+							...model,
+							source: "account" as const,
+						})),
+						...aliasEntries,
+					],
+					source: "live",
+				});
+			}
+
 			const catalog = await context.modelCatalog.get();
 			// `fallback` means an on-disk copy or the list bundled into the binary
 			// answered — not the provider. After a restart that would make the
