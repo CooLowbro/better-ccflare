@@ -17,7 +17,13 @@ export const CLAUDE_MODEL_IDS = {
 	OPUS_4_6: "claude-opus-4-6",
 	OPUS_4_7: "claude-opus-4-7",
 	OPUS_4_8: "claude-opus-4-8",
+	OPUS_5: "claude-opus-5",
+	OPUS_5_5: "claude-opus-5-5",
+	SONNET_5_5: "claude-sonnet-5-5",
+	HAIKU_5_5: "claude-haiku-5-5",
 	FABLE_5: "claude-fable-5",
+	FABLE_5_1: "claude-fable-5-1",
+	MYTHOS_5_1: "claude-mythos-5-1",
 } as const;
 
 // Snapshot date for the bundled model list above — bump this alongside
@@ -25,7 +31,7 @@ export const CLAUDE_MODEL_IDS = {
 // `fetchedAt` for the fallback catalog (packages/proxy/src/model-catalog.ts)
 // so a fresh install without a live-refreshable account shows an honest
 // "as of <date>" provenance instead of a misleading "just now".
-export const BUNDLED_MODELS_AS_OF = "2026-06-30";
+export const BUNDLED_MODELS_AS_OF = "2026-10-21";
 
 // Model display names
 export const MODEL_DISPLAY_NAMES: Record<string, string> = {
@@ -40,7 +46,13 @@ export const MODEL_DISPLAY_NAMES: Record<string, string> = {
 	[CLAUDE_MODEL_IDS.OPUS_4_6]: "Claude Opus 4.6",
 	[CLAUDE_MODEL_IDS.OPUS_4_7]: "Claude Opus 4.7",
 	[CLAUDE_MODEL_IDS.OPUS_4_8]: "Claude Opus 4.8",
+	[CLAUDE_MODEL_IDS.OPUS_5]: "Claude Opus 5",
+	[CLAUDE_MODEL_IDS.OPUS_5_5]: "Claude Opus 5.5",
+	[CLAUDE_MODEL_IDS.SONNET_5_5]: "Claude Sonnet 5.5",
+	[CLAUDE_MODEL_IDS.HAIKU_5_5]: "Claude Haiku 5.5",
 	[CLAUDE_MODEL_IDS.FABLE_5]: "Claude Fable 5",
+	[CLAUDE_MODEL_IDS.FABLE_5_1]: "Claude Fable 5.1",
+	[CLAUDE_MODEL_IDS.MYTHOS_5_1]: "Claude Mythos 5.1",
 };
 
 // Short model names used in UI (for color mapping, etc.)
@@ -56,15 +68,23 @@ export const MODEL_SHORT_NAMES: Record<string, string> = {
 	[CLAUDE_MODEL_IDS.OPUS_4_6]: "claude-opus-4.6",
 	[CLAUDE_MODEL_IDS.OPUS_4_7]: "claude-opus-4.7",
 	[CLAUDE_MODEL_IDS.OPUS_4_8]: "claude-opus-4.8",
+	[CLAUDE_MODEL_IDS.OPUS_5]: "claude-opus-5",
+	[CLAUDE_MODEL_IDS.OPUS_5_5]: "claude-opus-5.5",
+	[CLAUDE_MODEL_IDS.SONNET_5_5]: "claude-sonnet-5.5",
+	[CLAUDE_MODEL_IDS.HAIKU_5_5]: "claude-haiku-5.5",
 	[CLAUDE_MODEL_IDS.FABLE_5]: "claude-fable-5",
+	[CLAUDE_MODEL_IDS.FABLE_5_1]: "claude-fable-5.1",
+	[CLAUDE_MODEL_IDS.MYTHOS_5_1]: "claude-mythos-5.1",
 };
 
 // Latest model aliases — update these when Anthropic releases new models.
 // Check https://docs.anthropic.com/en/docs/about-claude/models for the current list.
-export const LATEST_FABLE_MODEL = CLAUDE_MODEL_IDS.FABLE_5;
-export const LATEST_OPUS_MODEL = CLAUDE_MODEL_IDS.OPUS_4_8;
-export const LATEST_SONNET_MODEL = CLAUDE_MODEL_IDS.SONNET_5;
-export const LATEST_HAIKU_MODEL = CLAUDE_MODEL_IDS.HAIKU_4_5;
+// Only used for UI placeholders and tests; routing reads the live catalog.
+export const LATEST_FABLE_MODEL = CLAUDE_MODEL_IDS.FABLE_5_1;
+export const LATEST_OPUS_MODEL = CLAUDE_MODEL_IDS.OPUS_5_5;
+export const LATEST_SONNET_MODEL = CLAUDE_MODEL_IDS.SONNET_5_5;
+export const LATEST_HAIKU_MODEL = CLAUDE_MODEL_IDS.HAIKU_5_5;
+export const LATEST_MYTHOS_MODEL = CLAUDE_MODEL_IDS.MYTHOS_5_1;
 
 // Default model for various contexts
 export const DEFAULT_MODEL = CLAUDE_MODEL_IDS.SONNET_5;

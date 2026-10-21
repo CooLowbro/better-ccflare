@@ -18,13 +18,18 @@ interface BedrockModel {
 	searchKey: string;
 }
 
-type ModelFamily = "fable" | "opus" | "sonnet" | "haiku";
+type ModelFamily = "fable" | "opus" | "sonnet" | "haiku" | "mythos";
 
 const MODEL_FAMILY_ALIASES: Record<ModelFamily, string[]> = {
 	fable: ["fable", "claude-fable", "claude-fable-5"],
 	opus: ["opus", "claude-opus", "claude-opus-4-6", "claude-4-opus"],
 	sonnet: ["sonnet", "claude-sonnet", "claude-sonnet-4-6", "claude-4-sonnet"],
 	haiku: ["haiku", "claude-haiku", "claude-haiku-4-5", "claude-4-haiku"],
+	// Listed for completeness with the routing families. Whether Bedrock
+	// actually carries this line is AWS's answer to give: the lookup below
+	// matches against what ListFoundationModels returns, so an absent family
+	// simply finds nothing rather than resolving to the wrong model.
+	mythos: ["mythos", "claude-mythos", "claude-mythos-5-1"],
 };
 
 /**

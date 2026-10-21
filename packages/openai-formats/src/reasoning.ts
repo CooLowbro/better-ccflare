@@ -25,14 +25,20 @@ const EFFORT_RANK: Record<ReasoningEffort, number> = {
 	max: 5,
 };
 
+// Measured against Anthropic's own /v1/models on 2026-10-21: every family
+// except haiku advertises all five efforts. Mythos 5.1 reports the full set
+// too — and, unlike the others, reports thinking as adaptive-only (neither
+// "enabled" nor "disabled" is supported), which is a thinking concern rather
+// than an effort one and so does not change this table.
 const CLAUDE_REASONING_EFFORTS: Record<
-	"fable" | "opus" | "sonnet" | "haiku",
+	"fable" | "opus" | "sonnet" | "haiku" | "mythos",
 	readonly ReasoningEffort[]
 > = {
 	fable: ["low", "medium", "high", "xhigh", "max"],
 	opus: ["low", "medium", "high", "xhigh", "max"],
 	sonnet: ["low", "medium", "high", "xhigh", "max"],
 	haiku: ["low", "medium"],
+	mythos: ["low", "medium", "high", "xhigh", "max"],
 };
 
 const TARGET_REASONING_EFFORTS: Record<string, readonly ReasoningEffort[]> = {

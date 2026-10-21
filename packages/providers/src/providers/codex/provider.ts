@@ -2085,6 +2085,8 @@ export class CodexProvider extends BaseProvider {
 			model = resolveProviderModelDefault("codex", "sonnet", id) ?? model;
 		} else if (lower.includes("opus")) {
 			model = resolveProviderModelDefault("codex", "opus", id) ?? model;
+		} else if (lower.includes("mythos")) {
+			model = resolveProviderModelDefault("codex", "mythos", id) ?? model;
 		}
 		return { model, isExplicitMapping: false };
 	}

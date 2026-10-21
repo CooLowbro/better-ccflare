@@ -278,8 +278,8 @@ export async function ensureCodexModelDefaults(
  * the tier and there is no table of ours to keep current: whatever OpenAI
  * promotes to the top becomes the frontier default by itself.
  *
- * `opus` and `fable` take the frontier model, `sonnet` the next one and
- * `haiku` the one after — matching what each Anthropic family is for. A
+ * `opus`, `fable` and `mythos` take the frontier model, `sonnet` the next one
+ * and `haiku` the one after — matching what each Anthropic family is for. A
  * shorter list degrades to the last available model rather than leaving a
  * family unmapped, because an unmapped family falls through to the Claude
  * name and the provider answers 400.
@@ -293,6 +293,7 @@ export function deriveFamilyDefaults(
 	return {
 		fable: at(0),
 		opus: at(0),
+		mythos: at(0),
 		sonnet: at(1),
 		haiku: at(2),
 	};
