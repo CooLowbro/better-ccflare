@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { CODEX_USER_AGENT } from "./provider";
+import { getCodexUserAgent } from "./client-version";
 import {
 	CODEX_USAGE_ENDPOINT,
 	fetchCodexUsageData,
@@ -216,7 +216,7 @@ describe("fetchCodexUsageData", () => {
 				const headers = init?.headers as Record<string, string>;
 				expect(headers.Authorization).toBe("Bearer tok-1");
 				expect(headers["ChatGPT-Account-Id"]).toBe("acct_1");
-				expect(headers["User-Agent"]).toBe(CODEX_USER_AGENT);
+				expect(headers["User-Agent"]).toBe(getCodexUserAgent());
 				expect(headers.originator).toBe("codex_cli_rs");
 				expect(headers.Accept).toBe("application/json");
 				return new Response(JSON.stringify(payload()), { status: 200 });

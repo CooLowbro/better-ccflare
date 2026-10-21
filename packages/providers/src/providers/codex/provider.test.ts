@@ -5,6 +5,7 @@ import {
 	clearDerivedProviderModelDefaults,
 	setDerivedProviderModelDefaults,
 } from "../../provider-model-defaults";
+import { getCodexVersion } from "./client-version";
 import { fetchCodexUsageOnDemand } from "./on-demand-fetch";
 import {
 	CODEX_CACHE_KEY_MODE_ENV,
@@ -12,7 +13,6 @@ import {
 	CODEX_PING_MODEL,
 	CODEX_PROMPT_CACHE_KEY_ENV,
 	CODEX_SYNTHETIC_COUNT_TOKENS_ENV,
-	CODEX_VERSION,
 	CodexProvider,
 } from "./provider";
 import { normalizeCodexInputUsage, parseCodexUsageHeaders } from "./usage";
@@ -122,7 +122,7 @@ describe("CodexProvider request headers", () => {
 		expect(prepared.get("authorization")).toBe("Bearer upstream-access-token");
 		expect(prepared.get("x-api-key")).toBeNull();
 		expect(prepared.get("x-better-ccflare-native-responses")).toBeNull();
-		expect(prepared.get("version")).toBe(CODEX_VERSION);
+		expect(prepared.get("version")).toBe(getCodexVersion());
 		expect(prepared.get("openai-beta")).toBe("responses=experimental");
 		expect(prepared.get("originator")).toBe("codex_cli_rs");
 		expect([...original.entries()]).toEqual(originalEntries);
@@ -5091,9 +5091,11 @@ describe("fetchCodexUsageOnDemand", () => {
 		const headersInit = recorded?.init.headers as Record<string, string>;
 		const headers = new Headers(headersInit);
 		expect(headers.get("Authorization")).toBe("Bearer test-token");
-		expect(headers.get("Version")).toBe(CODEX_VERSION);
+		expect(headers.get("Version")).toBe(getCodexVersion());
 		expect(headers.get("Openai-Beta")).toBe("responses=experimental");
-		expect(headers.get("User-Agent")).toContain(`codex-cli/${CODEX_VERSION}`);
+		expect(headers.get("User-Agent")).toContain(
+			`codex-cli/${getCodexVersion()}`,
+		);
 		expect(headers.get("originator")).toBe("codex_cli_rs");
 		expect(headers.get("Content-Type")).toBe("application/json");
 

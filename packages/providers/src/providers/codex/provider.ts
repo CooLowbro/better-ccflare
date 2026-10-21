@@ -31,6 +31,7 @@ import {
 	sanitizeCacheFacts,
 } from "./cache-telemetry";
 import { observeCodexWire } from "./cache-wire";
+import { getCodexUserAgent, getCodexVersion } from "./client-version";
 import {
 	CodexStreamLiveness,
 	type CodexStreamLivenessOptions,
@@ -102,10 +103,8 @@ const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CODEX_DEFAULT_ENDPOINT =
 	"https://chatgpt.com/backend-api/codex/responses";
-export const CODEX_VERSION = "0.157.1";
 /** Hosts that are OpenAI's own Codex/Responses API, not a custom endpoint. */
 const OPENAI_PROMPT_CACHE_HOSTS = new Set(["chatgpt.com", "api.openai.com"]);
-export const CODEX_USER_AGENT = `codex-cli/${CODEX_VERSION} (Windows 10.0.26100; x64)`;
 /**
  * Fallback model for the usage-header probe (`fetchCodexUsageOnDemand`) — never
  * used by real traffic, which always carries the client's own model.
@@ -695,7 +694,7 @@ export class CodexProvider extends BaseProvider {
 		}
 
 		if (_path === "/v1/models") {
-			return `https://chatgpt.com/backend-api/codex/models?client_version=${encodeURIComponent(CODEX_VERSION)}`;
+			return `https://chatgpt.com/backend-api/codex/models?client_version=${encodeURIComponent(getCodexVersion())}`;
 		}
 
 		if (account?.custom_endpoint) {
@@ -747,9 +746,9 @@ export class CodexProvider extends BaseProvider {
 		if (accessToken) {
 			newHeaders.set("Authorization", `Bearer ${accessToken}`);
 		}
-		newHeaders.set("Version", CODEX_VERSION);
+		newHeaders.set("Version", getCodexVersion());
 		newHeaders.set("Openai-Beta", "responses=experimental");
-		newHeaders.set("User-Agent", CODEX_USER_AGENT);
+		newHeaders.set("User-Agent", getCodexUserAgent());
 		newHeaders.set("originator", "codex_cli_rs");
 
 		return newHeaders;
@@ -812,7 +811,7 @@ export class CodexProvider extends BaseProvider {
 		account?: Account,
 	): Promise<Request> {
 		// /v1/models is handled as a passthrough GET.
-		const codexModelsUrl = `https://chatgpt.com/backend-api/codex/models?client_version=${encodeURIComponent(CODEX_VERSION)}`;
+		const codexModelsUrl = `https://chatgpt.com/backend-api/codex/models?client_version=${encodeURIComponent(getCodexVersion())}`;
 		if (request.url.startsWith(codexModelsUrl.split("?")[0])) {
 			return request;
 		}

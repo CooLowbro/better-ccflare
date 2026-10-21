@@ -144,6 +144,19 @@ Note: this is distinct from the `codex` *provider*, which routes requests outbou
 
 **Note:** `GET /v1/models` is proxied through to Claude like any other `/v1/*` request. A successful response (from a console/API-key account) is also passively captured into better-ccflare's own model catalog cache — see [Model Catalog](#model-catalog) below for the read endpoint (`GET /api/models`) and how the catalog is kept up to date.
 
+A successful `GET /v1/models` response is also **augmented** before it reaches
+the client: any registered [custom model alias](configuration.md#custom-model-aliases)
+and the cached live Anthropic catalog are appended to it. The upstream body is
+never reordered, altered or dropped — the client sees exactly what it would have
+seen, plus entries at the end, deduplicated by `id` with upstream winning. A
+body that fails to parse, one over 256 KB, or a case with nothing to add is
+forwarded byte-for-byte.
+
+Appending the Anthropic catalog is what keeps the listing from depending on
+which account the load balancer happened to pick: without it, a client whose
+request was answered by a Codex account would cache a listing with no Claude
+models in it.
+
 **Headers:**
 - All standard Claude API headers are supported
 - `Authorization` header is managed by better-ccflare (no need to provide)
@@ -854,6 +867,32 @@ Whether the model a client asks for must be the model that is sent — no combo 
 curl http://localhost:8080/api/config/force-account-model
 ```
 
+#### POST /api/config/custom-model-aliases
+
+Replace the whole custom model alias map. See
+[Custom Model Aliases](configuration.md#custom-model-aliases) for what aliases
+do and how to name them.
+
+Whole-map replacement rather than a merge: a merge offers no way to delete an
+alias, and an alias that cannot be deleted keeps routing traffic to a provider
+the operator has stopped choosing.
+
+```bash
+curl -X POST http://localhost:8080/api/config/custom-model-aliases   -H "Content-Type: application/json"   -d '{
+        "aliases": {
+          "claude-gpt-5.6-sol": {
+            "provider": "codex",
+            "model": "gpt-5.6-sol",
+            "displayName": "Sol xhigh"
+          }
+        }
+      }'
+```
+
+`provider` and `model` are both required on every entry; a missing one is a
+`400`. The response echoes the map as stored, after sanitization. Takes effect
+immediately — no restart.
+
 #### POST /api/config/force-account-model
 
 Enable or disable forced account model. Takes effect immediately, no restart required.
@@ -1156,6 +1195,7 @@ Pass `?provider=<name>` to list models for a non-Anthropic provider instead — 
 |----------|---------|
 | `builtin` | ccflare's own provider adapter knows this model id |
 | `catalog` | The live Anthropic `/v1/models` listing (Anthropic providers only) |
+| `alias` | A registered custom model alias. States that the operator declared this id — never that any account is entitled to its target |
 | `reference` | Listed in the public [models.dev](https://models.dev) catalogue — proves the model exists at the vendor, **not** that the account's plan can call it |
 | `account` | Read live from this specific account's own model listing — the only source that reflects real entitlement |
 

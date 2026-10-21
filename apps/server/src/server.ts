@@ -19,6 +19,7 @@ import {
 	readUsageUtilization,
 	registerCleanup,
 	registerDisposable,
+	setCustomModelAliases,
 	setForceAccountModel,
 	setPricingLogger,
 	shutdown,
@@ -73,6 +74,7 @@ import {
 	getUsageCollectorHealth,
 	getValidAccessToken,
 	handleProxy,
+	initCodexVersionDiscovery,
 	initModelCatalogRefresh,
 	initProxy,
 	lowestTierCodexModel,
@@ -565,6 +567,7 @@ let stopVacuumCatchUpJob: (() => void) | null = null;
 let stopWalCheckpointJob: (() => void) | null = null;
 let stopIntegritySchedulerJob: (() => void) | null = null;
 let stopModelCatalogRefreshJob: (() => void) | null = null;
+let stopCodexVersionDiscovery: (() => void) | null = null;
 let autoRefreshScheduler: AutoRefreshScheduler | null = null;
 let cacheKeepaliveScheduler: CacheKeepaliveScheduler | null = null;
 let memoryMonitorInterval: Timer | null = null;
@@ -1053,6 +1056,9 @@ export default async function startServer(options?: {
 	// which may depend on config; mirror the setting there before anything can
 	// route. The config POST handler mirrors it again after a write.
 	setForceAccountModel(config.getForceAccountModel());
+	// Same mirror, same reason: the alias registry is read at ingress, in core,
+	// which cannot reach the config file either.
+	setCustomModelAliases(config.getCustomModelAliases());
 	installOutboundProxy(() => config.getOutboundProxy());
 	// The usage poller detects Codex window rollovers with the same predicate
 	// as the traffic path, so it must ride the same window. Config cannot be
@@ -2155,6 +2161,12 @@ Available endpoints:
 	// rather than a single long-lived interval timer).
 	stopModelCatalogRefreshJob = initModelCatalogRefresh(proxyContext);
 
+	// Follow the Codex CLI's own releases. OpenAI serves both the model
+	// catalogue and the execution endpoint according to the client version we
+	// declare, so a version pinned at build time quietly shrinks the product:
+	// models ship and the declared client never hears about them.
+	stopCodexVersionDiscovery = initCodexVersionDiscovery();
+
 	const serverPort = serverInstance.port;
 	if (typeof serverPort !== "number") {
 		throw new Error("Server instance has no valid port");
@@ -2369,6 +2381,10 @@ async function handleGracefulShutdown(signal: string) {
 		if (stopIntegritySchedulerJob) {
 			stopIntegritySchedulerJob();
 			stopIntegritySchedulerJob = null;
+		}
+		if (stopCodexVersionDiscovery) {
+			stopCodexVersionDiscovery();
+			stopCodexVersionDiscovery = null;
 		}
 		if (stopModelCatalogRefreshJob) {
 			stopModelCatalogRefreshJob();

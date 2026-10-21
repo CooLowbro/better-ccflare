@@ -1,4 +1,12 @@
 export { extractChatgptAccountId } from "./account-id";
+export {
+	CODEX_VERSION_FLOOR,
+	getCodexUserAgent,
+	getCodexVersion,
+	initCodexVersionDiscovery,
+	refreshCodexVersion,
+	setDiscoveredCodexVersionForTests,
+} from "./client-version";
 export type { CodexDeviceFlowResult, CodexTokenResponse } from "./device-oauth";
 export {
 	initiateCodexDeviceFlow,
@@ -15,8 +23,6 @@ export {
 	CODEX_KNOWN_MODELS,
 	CODEX_MODEL_CONTEXT_WINDOWS,
 	CODEX_PING_MODEL,
-	CODEX_USER_AGENT,
-	CODEX_VERSION,
 	CodexProvider,
 } from "./provider";
 export { parseCodexUsageHeaders } from "./usage";

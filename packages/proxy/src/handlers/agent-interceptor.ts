@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { agentRegistry } from "@better-ccflare/agents";
+import { isRegisteredAlias, resolveModelAlias } from "@better-ccflare/core";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import { Logger } from "@better-ccflare/logger";
 import { validatePath } from "@better-ccflare/security";
@@ -17,6 +18,12 @@ export interface AgentInterceptResult {
 	originalModel: string | null;
 	appliedModel: string | null;
 	agentAttributionSource: AgentAttributionSource;
+	/**
+	 * Provider named by the registered alias the client asked for, or null when
+	 * the request did not come in through one. Account selection needs it:
+	 * `appliedModel` alone carries the resolved model but not who serves it.
+	 */
+	aliasProvider?: string | null;
 }
 
 /**
@@ -31,6 +38,11 @@ export function isRewriteTargetServable(
 	catalog: ModelCatalog | null | undefined,
 	model: string,
 ): boolean {
+	// A registered alias is never in the Anthropic catalog — it is not an
+	// Anthropic model, which is the entire point of registering it. The
+	// operator has already vouched for this id by putting it in the config, so
+	// the catalog has nothing to add and its silence must not be read as a veto.
+	if (isRegisteredAlias(model)) return true;
 	if (!catalog) return true;
 	if (catalog.source !== "live") return true;
 	if (catalog.models.length === 0) return true;
@@ -88,6 +100,14 @@ export async function interceptAndModifyRequest(
 	// the original model (best-effort) instead of resetting it to null.
 	let originalModel: string | null = null;
 
+	// Same reasoning, one step further: once an alias has been resolved the
+	// body no longer holds the id the client sent, so a failure after that
+	// point must still report — and still forward — the resolved form. A catch
+	// that fell back to the untouched buffer would put the alias id on the
+	// wire, where no upstream knows it.
+	let aliasProvider: string | null = null;
+	let aliasedModel: string | null = null;
+
 	try {
 		const parsedBody = bodyContext.getParsedJson();
 		if (!parsedBody) {
@@ -97,6 +117,30 @@ export async function interceptAndModifyRequest(
 		// Extract original model
 		originalModel =
 			typeof parsedBody.model === "string" ? parsedBody.model : null;
+
+		// Resolve a registered alias before anything else looks at the model.
+		//
+		// Order matters: every step below — agent preference, the catalog veto,
+		// and account selection downstream — reasons about a model id that has
+		// to be real by then. Resolving here means an alias is indistinguishable
+		// from the client having asked for the real model in the first place,
+		// which is exactly the promise an alias makes, and it keeps the rest of
+		// the pipeline free of alias-awareness.
+		//
+		// `originalModel` deliberately keeps the alias id: it is what the client
+		// actually sent, and the request log is the one place that distinction
+		// is worth preserving.
+		if (originalModel) {
+			const alias = resolveModelAlias(originalModel);
+			if (alias) {
+				log.info(
+					`Model alias ${originalModel} -> ${alias.model} (provider ${alias.provider})`,
+				);
+				bodyContext.setModel(alias.model);
+				aliasProvider = alias.provider;
+				aliasedModel = alias.model;
+			}
+		}
 
 		// Explicit agent attribution via header (vendor-neutral): lets any client —
 		// a multi-agent orchestrator, a router, an SDK wrapper — declare which agent
@@ -155,6 +199,11 @@ export async function interceptAndModifyRequest(
 						originalModel,
 						appliedModel: preferredModel,
 						agentAttributionSource: "header_agent",
+						// The agent preference replaced the alias's model outright, so the
+						// alias no longer says anything about who should serve this
+						// request: constraining selection to its provider would strand a
+						// Claude preference on a Codex account.
+						aliasProvider: null,
 					};
 				}
 				log.warn(
@@ -162,11 +211,12 @@ export async function interceptAndModifyRequest(
 				);
 			}
 			return {
-				modifiedBody: requestBodyBuffer,
+				modifiedBody: aliasedModel ? bodyContext.getBuffer() : requestBodyBuffer,
 				agentUsed: explicitAgentId,
 				originalModel,
-				appliedModel: originalModel,
+				appliedModel: aliasedModel ?? originalModel,
 				agentAttributionSource: "header_agent",
+				aliasProvider,
 			};
 		}
 
@@ -182,11 +232,12 @@ export async function interceptAndModifyRequest(
 			// through unchanged.
 			log.debug(`Session attributed via header: ${sessionHeaderId}`);
 			return {
-				modifiedBody: requestBodyBuffer,
+				modifiedBody: aliasedModel ? bodyContext.getBuffer() : requestBodyBuffer,
 				agentUsed: sessionHeaderId,
 				originalModel,
-				appliedModel: originalModel,
+				appliedModel: aliasedModel ?? originalModel,
 				agentAttributionSource: "session_header",
+				aliasProvider,
 			};
 		};
 
@@ -198,11 +249,12 @@ export async function interceptAndModifyRequest(
 			const fallback = sessionFallback();
 			if (fallback) return fallback;
 			return {
-				modifiedBody: requestBodyBuffer,
+				modifiedBody: aliasedModel ? bodyContext.getBuffer() : requestBodyBuffer,
 				agentUsed: null,
 				originalModel,
-				appliedModel: originalModel,
+				appliedModel: aliasedModel ?? originalModel,
 				agentAttributionSource: "none",
+				aliasProvider,
 			};
 		}
 
@@ -274,11 +326,12 @@ export async function interceptAndModifyRequest(
 			const fallback = sessionFallback();
 			if (fallback) return fallback;
 			return {
-				modifiedBody: requestBodyBuffer,
+				modifiedBody: aliasedModel ? bodyContext.getBuffer() : requestBodyBuffer,
 				agentUsed: null,
 				originalModel,
-				appliedModel: originalModel,
+				appliedModel: aliasedModel ?? originalModel,
 				agentAttributionSource: "none",
+				aliasProvider,
 			};
 		}
 
@@ -309,11 +362,12 @@ export async function interceptAndModifyRequest(
 		// modification is needed. agentUsed is still reported for attribution.
 		if (!preferredModel || preferredModel === originalModel) {
 			return {
-				modifiedBody: requestBodyBuffer,
+				modifiedBody: aliasedModel ? bodyContext.getBuffer() : requestBodyBuffer,
 				agentUsed: detectedAgent.id,
 				originalModel,
-				appliedModel: originalModel,
+				appliedModel: aliasedModel ?? originalModel,
 				agentAttributionSource: "prompt_agent",
+				aliasProvider,
 			};
 		}
 
@@ -323,11 +377,12 @@ export async function interceptAndModifyRequest(
 				`Agent ${detectedAgent.id} prefers model ${preferredModel} which is not in the live model list — passing through ${originalModel}`,
 			);
 			return {
-				modifiedBody: requestBodyBuffer,
+				modifiedBody: aliasedModel ? bodyContext.getBuffer() : requestBodyBuffer,
 				agentUsed: detectedAgent.id,
 				originalModel,
-				appliedModel: originalModel,
+				appliedModel: aliasedModel ?? originalModel,
 				agentAttributionSource: "prompt_agent",
+				aliasProvider,
 			};
 		}
 
@@ -341,6 +396,9 @@ export async function interceptAndModifyRequest(
 			originalModel,
 			appliedModel: preferredModel,
 			agentAttributionSource: "prompt_agent",
+			// See the header_agent return above: a preference rewrite supersedes
+			// the alias, provider included.
+			aliasProvider: null,
 		};
 	} catch (error) {
 		log.error("Failed to intercept/modify request:", error);
@@ -348,11 +406,12 @@ export async function interceptAndModifyRequest(
 		// been extracted before the failure (best-effort) — preserve it
 		// instead of resetting to null so downstream routing still sees it.
 		return {
-			modifiedBody: requestBodyBuffer,
+			modifiedBody: aliasedModel ? bodyContext.getBuffer() : requestBodyBuffer,
 			agentUsed: null,
 			originalModel,
-			appliedModel: originalModel,
+			appliedModel: aliasedModel ?? originalModel,
 			agentAttributionSource: "none",
+			aliasProvider,
 		};
 	}
 }

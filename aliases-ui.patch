@@ -1,0 +1,2352 @@
+diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
+index 732ee3d..aefbc70 100644
+--- a/apps/server/src/server.ts
++++ b/apps/server/src/server.ts
+@@ -19,6 +19,7 @@ import {
+ 	readUsageUtilization,
+ 	registerCleanup,
+ 	registerDisposable,
++	setCustomModelAliases,
+ 	setForceAccountModel,
+ 	setPricingLogger,
+ 	shutdown,
+@@ -1053,6 +1054,9 @@ export default async function startServer(options?: {
+ 	// which may depend on config; mirror the setting there before anything can
+ 	// route. The config POST handler mirrors it again after a write.
+ 	setForceAccountModel(config.getForceAccountModel());
++	// Same mirror, same reason: the alias registry is read at ingress, in core,
++	// which cannot reach the config file either.
++	setCustomModelAliases(config.getCustomModelAliases());
+ 	installOutboundProxy(() => config.getOutboundProxy());
+ 	// The usage poller detects Codex window rollovers with the same predicate
+ 	// as the traffic path, so it must ride the same window. Config cannot be
+diff --git a/docs/api-http.md b/docs/api-http.md
+index 4c0ca9d..d8d5224 100644
+--- a/docs/api-http.md
++++ b/docs/api-http.md
+@@ -144,6 +144,19 @@ Note: this is distinct from the `codex` *provider*, which routes requests outbou
+ 
+ **Note:** `GET /v1/models` is proxied through to Claude like any other `/v1/*` request. A successful response (from a console/API-key account) is also passively captured into better-ccflare's own model catalog cache — see [Model Catalog](#model-catalog) below for the read endpoint (`GET /api/models`) and how the catalog is kept up to date.
+ 
++A successful `GET /v1/models` response is also **augmented** before it reaches
++the client: any registered [custom model alias](configuration.md#custom-model-aliases)
++and the cached live Anthropic catalog are appended to it. The upstream body is
++never reordered, altered or dropped — the client sees exactly what it would have
++seen, plus entries at the end, deduplicated by `id` with upstream winning. A
++body that fails to parse, one over 256 KB, or a case with nothing to add is
++forwarded byte-for-byte.
++
++Appending the Anthropic catalog is what keeps the listing from depending on
++which account the load balancer happened to pick: without it, a client whose
++request was answered by a Codex account would cache a listing with no Claude
++models in it.
++
+ **Headers:**
+ - All standard Claude API headers are supported
+ - `Authorization` header is managed by better-ccflare (no need to provide)
+@@ -854,6 +867,32 @@ Whether the model a client asks for must be the model that is sent — no combo
+ curl http://localhost:8080/api/config/force-account-model
+ ```
+ 
++#### POST /api/config/custom-model-aliases
++
++Replace the whole custom model alias map. See
++[Custom Model Aliases](configuration.md#custom-model-aliases) for what aliases
++do and how to name them.
++
++Whole-map replacement rather than a merge: a merge offers no way to delete an
++alias, and an alias that cannot be deleted keeps routing traffic to a provider
++the operator has stopped choosing.
++
++```bash
++curl -X POST http://localhost:8080/api/config/custom-model-aliases   -H "Content-Type: application/json"   -d '{
++        "aliases": {
++          "claude-gpt-5.6-sol": {
++            "provider": "codex",
++            "model": "gpt-5.6-sol",
++            "displayName": "Sol xhigh"
++          }
++        }
++      }'
++```
++
++`provider` and `model` are both required on every entry; a missing one is a
++`400`. The response echoes the map as stored, after sanitization. Takes effect
++immediately — no restart.
++
+ #### POST /api/config/force-account-model
+ 
+ Enable or disable forced account model. Takes effect immediately, no restart required.
+@@ -1156,6 +1195,7 @@ Pass `?provider=<name>` to list models for a non-Anthropic provider instead —
+ |----------|---------|
+ | `builtin` | ccflare's own provider adapter knows this model id |
+ | `catalog` | The live Anthropic `/v1/models` listing (Anthropic providers only) |
++| `alias` | A registered custom model alias. States that the operator declared this id — never that any account is entitled to its target |
+ | `reference` | Listed in the public [models.dev](https://models.dev) catalogue — proves the model exists at the vendor, **not** that the account's plan can call it |
+ | `account` | Read live from this specific account's own model listing — the only source that reflects real entitlement |
+ 
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 24beda4..d0c61f6 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -331,6 +331,66 @@ This is off by default because it changes what a Claude family model name means
+ 
+ Manage this via the dashboard (Settings → Advanced → Force Account Model) or the API — see [api-http.md](api-http.md#get-apiconfigforce-account-model).
+ 
++## Custom Model Aliases
++
++`custom_model_aliases` (config file only — no environment variable, empty by
++default) lets a client ask for a model id that better-ccflare resolves to a
++different model on a specific provider.
++
++```json
++{
++  "custom_model_aliases": {
++    "claude-gpt-5.6-sol": {
++      "provider": "codex",
++      "model": "gpt-5.6-sol",
++      "displayName": "Sol xhigh",
++      "description": "GPT-5.6 Sol via Codex"
++    }
++  }
++}
++```
++
++### What it is for
++
++Some clients will only accept model ids that look like Claude models. Claude
++Code's gateway model discovery is the clearest case: it fetches
++`GET /v1/models` from the gateway and then drops every entry whose id fails
++`/(claude|anthropic)/i` before its model picker ever sees it. `gpt-5.6-sol`
++cannot survive that; `claude-gpt-5.6-sol` can.
++
++**Name aliases so they contain `claude` — and so they do NOT contain `fable`,
++`opus`, `sonnet` or `haiku`.** Those four words are how `getModelFamily` reads a
++model's family out of its id, and a family drives combo routing, per-family
++capacity accounting and the rewrite veto. An alias called
++`claude-sonnet-gpt-5.6-sol` would be accounted for as a Sonnet request while
++actually going to Codex.
++
++### How it behaves
++
++- **Resolved at ingress**, before account selection, so everything downstream
++  sees the real model. This is deliberate: the alias is what decides which
++  accounts are eligible, so it cannot be resolved after that choice.
++- **Account selection is restricted to `provider`.** If no account of that
++  provider is available the request fails rather than being served by someone
++  else — the substitution aliases exist to prevent.
++- **The response is relabelled back to the alias**, through the same machinery
++  that already relabels a mapped model, so a client sees the id it asked for.
++- **An agent model preference still wins.** A preference already overrides an
++  explicit client model today; when it fires, the alias's provider restriction
++  is dropped with it.
++- **Listed in both model endpoints.** `GET /v1/models` gets the aliases (and
++  the cached Anthropic catalog) appended to whatever the upstream answered —
++  never replacing or reordering it. `GET /api/models` tags them
++  `source: "alias"`.
++
++Manage this through the API — see
++[api-http.md](api-http.md#post-apiconfigcustom-model-aliases).
++
++**Client-side requirement:** Claude Code only performs gateway model discovery
++when `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` is set in its environment, and
++only when `ANTHROPIC_BASE_URL` points at a non-first-party host. Serving the
++aliases is necessary but not sufficient; the client has to be asking.
++
+ ## Runtime Configuration API
+ 
+ Some configuration values can be updated at runtime through the HTTP API without restarting the server.
+diff --git a/packages/config/src/index.ts b/packages/config/src/index.ts
+index 3111466..a5bb56e 100644
+--- a/packages/config/src/index.ts
++++ b/packages/config/src/index.ts
+@@ -3,6 +3,8 @@ import { EventEmitter } from "node:events";
+ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+ import { dirname } from "node:path";
+ import {
++	type CustomModelAlias,
++	type CustomModelAliases,
+ 	DEFAULT_AGENT_MODEL,
+ 	DEFAULT_STRATEGY,
+ 	isValidStrategy,
+@@ -66,6 +68,13 @@ export type ProviderModelDefaultOverrides = Record<
+ 	Record<string, string>
+ >;
+ 
++/**
++ * The alias types live in core, not here: the registry that resolves them has
++ * to sit beside the model-mapping funnel, which cannot import this package.
++ * Re-exported so callers that already depend on config keep one import site.
++ */
++export type { CustomModelAlias, CustomModelAliases };
++
+ /**
+  * Env var that expands which providers accept editable model-default
+  * overrides (via the config file, the API, and the dashboard tab).
+@@ -127,6 +136,7 @@ export interface ConfigData {
+ 	combo_session_fallback?: boolean;
+ 	force_account_model?: boolean;
+ 	provider_model_default_overrides?: ProviderModelDefaultOverrides;
++	custom_model_aliases?: CustomModelAliases;
+ 	agent_frontmatter_model_fallback?: boolean;
+ 	model_catalog_oauth_refresh_enabled?: boolean;
+ 	health_detail_enabled?: boolean;
+@@ -163,6 +173,7 @@ export interface ConfigData {
+ 		| number
+ 		| boolean
+ 		| ProviderModelDefaultOverrides
++		| CustomModelAliases
+ 		| undefined;
+ }
+ 
+@@ -1005,6 +1016,46 @@ export class Config extends EventEmitter {
+ 		});
+ 	}
+ 
++	/**
++	 * Registered model aliases, sanitized. An entry missing `provider` or
++	 * `model` is dropped rather than half-applied: a half-applied alias would
++	 * resolve to an empty model name at ingress, which is far harder to
++	 * diagnose than an alias that simply is not there.
++	 */
++	getCustomModelAliases(): CustomModelAliases {
++		const raw = this.data.custom_model_aliases;
++		if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
++		const aliases: CustomModelAliases = {};
++		for (const [id, entry] of Object.entries(raw)) {
++			if (!id.trim()) continue;
++			if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
++			const { provider, model, displayName, description } =
++				entry as Partial<CustomModelAlias>;
++			if (typeof provider !== "string" || !provider.trim()) continue;
++			if (typeof model !== "string" || !model.trim()) continue;
++			aliases[id.trim()] = {
++				provider: provider.trim(),
++				model: model.trim(),
++				...(typeof displayName === "string" && displayName.trim()
++					? { displayName: displayName.trim() }
++					: {}),
++				...(typeof description === "string" && description.trim()
++					? { description: description.trim() }
++					: {}),
++			};
++		}
++		return aliases;
++	}
++
++	setCustomModelAliases(aliases: CustomModelAliases): void {
++		this.data.custom_model_aliases = aliases;
++		this.saveConfig();
++		this.emit("change", {
++			key: "custom_model_aliases",
++			newValue: aliases,
++		});
++	}
++
+ 	/**
+ 	 * Providers currently allowed to edit their model-default overrides:
+ 	 * "codex" by default, or the exact CCFLARE_MODEL_DEFAULTS_PROVIDERS
+@@ -1194,7 +1245,12 @@ export class Config extends EventEmitter {
+ 
+ 	getAllSettings(): Record<
+ 		string,
+-		string | number | boolean | ProviderModelDefaultOverrides | undefined
++		| string
++		| number
++		| boolean
++		| ProviderModelDefaultOverrides
++		| CustomModelAliases
++		| undefined
+ 	> {
+ 		// Include current strategy (which might come from env)
+ 		return {
+@@ -1217,6 +1273,7 @@ export class Config extends EventEmitter {
+ 			combos_enabled: this.getCombosEnabled(),
+ 			combo_session_fallback: this.getComboSessionFallback(),
+ 			force_account_model: this.getForceAccountModel(),
++			custom_model_aliases: this.getCustomModelAliases(),
+ 			agent_frontmatter_model_fallback: this.getAgentFrontmatterModelFallback(),
+ 			model_catalog_oauth_refresh_enabled:
+ 				this.getModelCatalogOAuthRefreshEnabled(),
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index 27fb16c..9d0fb80 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -39,6 +39,7 @@ export type ModelFallback = { [modelFamily: string]: string };
+ export * from "./alert-events";
+ export * from "./auth-failure-events";
+ export * from "./force-account-model";
++export * from "./model-aliases";
+ export {
+ 	type IntervalConfig,
+ 	intervalManager,
+diff --git a/packages/core/src/model-aliases.test.ts b/packages/core/src/model-aliases.test.ts
+new file mode 100644
+index 0000000..89bd721
+--- /dev/null
++++ b/packages/core/src/model-aliases.test.ts
+@@ -0,0 +1,79 @@
++import { afterAll, beforeEach, describe, expect, test } from "bun:test";
++import { getModelFamily, isValidClaudeModel } from "./model-mappings";
++import {
++	isRegisteredAlias,
++	listModelAliases,
++	resolveModelAlias,
++	setCustomModelAliases,
++} from "./model-aliases";
++
++beforeEach(() => {
++	setCustomModelAliases({});
++});
++
++// The registry is process-global by design (see model-aliases.ts). Leaving it
++// populated would reach every test file that runs after this one in the same
++// bun process — which is exactly how this cleanup came to be written.
++afterAll(() => {
++	setCustomModelAliases({});
++});
++
++describe("model alias registry", () => {
++	test("resolves a registered alias to its provider and model", () => {
++		setCustomModelAliases({
++			"claude-gpt-5.6-sol": { provider: "codex", model: "gpt-5.6-sol" },
++		});
++		expect(resolveModelAlias("claude-gpt-5.6-sol")).toEqual({
++			provider: "codex",
++			model: "gpt-5.6-sol",
++		});
++		expect(isRegisteredAlias("claude-gpt-5.6-sol")).toBe(true);
++	});
++
++	test("matches exactly — no case folding, no prefix stripping", () => {
++		setCustomModelAliases({
++			"claude-gpt-5.6-sol": { provider: "codex", model: "gpt-5.6-sol" },
++		});
++		expect(resolveModelAlias("CLAUDE-GPT-5.6-SOL")).toBeNull();
++		expect(resolveModelAlias("gpt-5.6-sol")).toBeNull();
++		expect(resolveModelAlias("claude-gpt-5.6-sol-1m")).toBeNull();
++	});
++
++	test("an unknown id is not an alias", () => {
++		expect(resolveModelAlias("claude-opus-5")).toBeNull();
++		expect(isRegisteredAlias("claude-opus-5")).toBe(false);
++	});
++
++	test("setting replaces the whole map, so an alias can be removed", () => {
++		setCustomModelAliases({
++			a: { provider: "codex", model: "x" },
++			b: { provider: "codex", model: "y" },
++		});
++		setCustomModelAliases({ a: { provider: "codex", model: "x" } });
++		expect(isRegisteredAlias("b")).toBe(false);
++	});
++
++	test("the registry copies, so a caller's later mutation cannot reach it", () => {
++		const mine = { a: { provider: "codex", model: "x" } };
++		setCustomModelAliases(mine);
++		// biome-ignore lint/performance/noDelete: exercising caller mutation
++		delete (mine as Record<string, unknown>).a;
++		expect(isRegisteredAlias("a")).toBe(true);
++		const listed = listModelAliases();
++		delete (listed as Record<string, unknown>).a;
++		expect(isRegisteredAlias("a")).toBe(true);
++	});
++
++	test("an alias id reports no model family — this is the point", () => {
++		// The family words (fable/opus/sonnet/haiku) drive combo routing and
++		// per-family capacity accounting. An alias must not smuggle one in: if
++		// `claude-gpt-5.6-sol` reported a family, the request would be counted
++		// and routed as that family while actually going to Codex.
++		setCustomModelAliases({
++			"claude-gpt-5.6-sol": { provider: "codex", model: "gpt-5.6-sol" },
++		});
++		expect(getModelFamily("claude-gpt-5.6-sol")).toBeNull();
++		expect(isValidClaudeModel("claude-gpt-5.6-sol")).toBe(false);
++		expect(isRegisteredAlias("claude-gpt-5.6-sol")).toBe(true);
++	});
++});
+diff --git a/packages/core/src/model-aliases.ts b/packages/core/src/model-aliases.ts
+new file mode 100644
+index 0000000..401fa0a
+--- /dev/null
++++ b/packages/core/src/model-aliases.ts
+@@ -0,0 +1,146 @@
++/**
++ * Registered model aliases: a client-facing model id that stands for a real
++ * model on a specific provider.
++ *
++ * The problem this solves: a client whose model picker only accepts Claude-ish
++ * names cannot ask for `gpt-5.6-sol`. Claude Code's gateway model discovery, for
++ * one, fetches `/v1/models` and then drops every id that fails
++ * `/(claude|anthropic)/i` before the picker ever sees it. An alias named
++ * `claude-gpt-5.6-sol` survives that filter and resolves here, at ingress, to
++ * `gpt-5.6-sol` on the `codex` provider.
++ *
++ * Why this is not a row in `model_mappings`: those are per-account and run
++ * AFTER an account has been selected. An alias has to resolve BEFORE, because
++ * the alias is what decides which accounts are eligible in the first place.
++ * Folding the two together would make an alias depend on the very choice it is
++ * supposed to constrain.
++ *
++ * Why the names are not translated into the `fable|opus|sonnet|haiku` family
++ * vocabulary: they must not be. `getModelFamily` reads those words out of the
++ * id, so an alias called `claude-sonnet-gpt-5.6-sol` would report family
++ * "sonnet" and quietly poison combo routing, per-family capacity accounting and
++ * the rewrite veto. An alias id says nothing about family on purpose, and every
++ * guard that needs to admit one consults `isRegisteredAlias` instead of
++ * inventing a family for it.
++ *
++ * Like the "force account model" switch next door, this is a plain in-memory
++ * registry rather than a config read: the code that resolves a model sits in
++ * core and proxy, and neither may depend on @better-ccflare/config without
++ * inverting the dependency graph. The config file stays the source of truth —
++ * apps/server pushes the value in at boot and the config POST handler pushes it
++ * again after a write, so a change takes effect without a restart.
++ */
++
++import { KNOWN_PATTERNS } from "./model-mappings";
++
++/** What one alias stands for. */
++export interface CustomModelAlias {
++	/** Provider that serves the real model; narrows account selection. */
++	provider: string;
++	/** Model id actually sent upstream. */
++	model: string;
++	/** Shown in a client's model picker; falls back to the alias id. */
++	displayName?: string;
++	description?: string;
++}
++
++/** Alias id -> what it stands for. */
++export type CustomModelAliases = Record<string, CustomModelAlias>;
++
++let aliases: CustomModelAliases = {};
++
++/**
++ * Mirror the config value here. Called at boot and after a successful write.
++ *
++ * Copies the map rather than holding the caller's object: the registry is read
++ * on every request and must not change shape underneath one because a caller
++ * kept mutating what it passed in.
++ */
++export function setCustomModelAliases(next: CustomModelAliases): void {
++	aliases = { ...next };
++}
++
++/** The registry as it currently stands. */
++export function listModelAliases(): CustomModelAliases {
++	return { ...aliases };
++}
++
++/**
++ * Resolve an alias id, or null when the id is not an alias.
++ *
++ * Exact match only. No prefix stripping, no case folding, no "close enough":
++ * a near-miss must fall through to the ordinary model path and be handled
++ * there, because silently resolving an id the operator did not register is how
++ * a request reaches a provider nobody chose.
++ */
++export function resolveModelAlias(modelId: string): CustomModelAlias | null {
++	return aliases[modelId] ?? null;
++}
++
++/**
++ * Whether this id is a registered alias.
++ *
++ * This is the question the acceptance guards ask — `isRewriteTargetServable`
++ * in the proxy and `isAllowedModel` in the HTTP API — before rejecting an id
++ * that carries no Claude family word and is absent from the live Anthropic
++ * catalog. Both of those are right to be suspicious of such an id by default;
++ * a registered alias is the one case where the operator has already answered
++ * for it.
++ */
++export function isRegisteredAlias(modelId: string): boolean {
++	return Object.hasOwn(aliases, modelId);
++}
++
++/** A problem with a proposed alias id, and how much it matters. */
++export interface AliasIdProblem {
++	/**
++	 * "error" — the alias would corrupt routing; refuse it.
++	 * "warning" — the alias works here but a Claude Code client will never show
++	 * it. Other clients may be fine, so this is not ours to refuse.
++	 */
++	level: "error" | "warning";
++	message: string;
++}
++
++/** The family words that an alias id must not contain. */
++const FAMILY_WORDS = KNOWN_PATTERNS;
++
++/**
++ * Judge a proposed alias id against the two naming rules, so that the HTTP
++ * handler and the dashboard form say the same thing about the same id instead
++ * of each carrying its own half-remembered copy of the rules.
++ *
++ * Returns null when the id is fine, otherwise the single most serious problem.
++ */
++export function describeAliasIdProblem(id: string): AliasIdProblem | null {
++	const trimmed = id.trim();
++	if (!trimmed) {
++		return { level: "error", message: "An alias id cannot be empty." };
++	}
++
++	// Error, not warning: `getModelFamily` reads the family out of the id, so an
++	// alias carrying a family word is counted and routed as that family while
++	// actually being served by another provider. Nothing downstream can detect
++	// that afterwards — the id itself is the lie.
++	const offender = FAMILY_WORDS.find((word) =>
++		trimmed.toLowerCase().includes(word),
++	);
++	if (offender) {
++		return {
++			level: "error",
++			message: `An alias id must not contain "${offender}": the word names a Claude family, and combo routing and per-family capacity would treat this alias as that family. Pick a name without ${FAMILY_WORDS.join(", ")}.`,
++		};
++	}
++
++	// Warning, not error: this is a property of one client, and this proxy
++	// serves others. Refusing the id would be asserting more than we know.
++	if (!/(claude|anthropic)/i.test(trimmed)) {
++		return {
++			level: "warning",
++			message:
++				'A Claude Code client drops every id failing /(claude|anthropic)/i before its model picker sees it, so this alias will work over the API but never appear in that picker. Prefix it with "claude-" if you want it listed there.',
++		};
++	}
++
++	return null;
++}
+diff --git a/packages/dashboard-web/src/components/overview/AdvancedSettingsCard.tsx b/packages/dashboard-web/src/components/overview/AdvancedSettingsCard.tsx
+index 0ad1c65..e1a86e8 100644
+--- a/packages/dashboard-web/src/components/overview/AdvancedSettingsCard.tsx
++++ b/packages/dashboard-web/src/components/overview/AdvancedSettingsCard.tsx
+@@ -8,6 +8,7 @@ import {
+ } from "../ui/card";
+ import { Separator } from "../ui/separator";
+ import { ConfigFlagDialog } from "./ConfigFlagDialog";
++import { CustomModelAliasesDialog } from "./CustomModelAliasesDialog";
+ import { ProviderModelDefaultsDialog } from "./ProviderModelDefaultsDialog";
+ 
+ /**
+@@ -35,6 +36,13 @@ const ADVANCED_SETTINGS_ITEMS: AdvancedSettingItem[] = [
+ 			"Built-in fallback model per provider and Claude family, used only as a last resort.",
+ 		dialog: <ProviderModelDefaultsDialog />,
+ 	},
++	{
++		id: "custom-model-aliases",
++		title: "Custom Model Aliases",
++		description:
++			"A model id clients may ask for, standing for a real model on a named provider.",
++		dialog: <CustomModelAliasesDialog />,
++	},
+ 	{
+ 		id: "combo-session-fallback",
+ 		title: "Combo Session Fallback",
+diff --git a/packages/dashboard-web/src/components/overview/CustomModelAliasesDialog.tsx b/packages/dashboard-web/src/components/overview/CustomModelAliasesDialog.tsx
+new file mode 100644
+index 0000000..d93dc93
+--- /dev/null
++++ b/packages/dashboard-web/src/components/overview/CustomModelAliasesDialog.tsx
+@@ -0,0 +1,457 @@
++import { describeAliasIdProblem } from "@better-ccflare/core";
++import {
++	AlertCircle,
++	AlertTriangle,
++	Info,
++	Loader2,
++	Plus,
++	Save,
++	Trash2,
++} from "lucide-react";
++import { useEffect, useMemo, useState } from "react";
++import { useAccounts } from "../../hooks/queries";
++import {
++	useCustomModelAliases,
++	useSaveCustomModelAliases,
++} from "../../hooks/useCustomModelAliases";
++import type { CustomModelAliasRow } from "../../lib/custom-model-aliases-api";
++import { Button } from "../ui/button";
++import {
++	Dialog,
++	DialogContent,
++	DialogDescription,
++	DialogHeader,
++	DialogTitle,
++	DialogTrigger,
++} from "../ui/dialog";
++import { Input } from "../ui/input";
++import { Label } from "../ui/label";
++import {
++	Select,
++	SelectContent,
++	SelectItem,
++	SelectTrigger,
++	SelectValue,
++} from "../ui/select";
++
++/**
++ * Custom model aliases: a client-facing model id standing for a real model on
++ * a named provider, resolved at ingress before account selection.
++ *
++ * It has a UI because the alias id obeys two rules that are invisible from
++ * outside and expensive to get wrong, and a JSON file cannot tell you when you
++ * have broken them:
++ *
++ *   - it must NOT contain fable/opus/sonnet/haiku, because `getModelFamily`
++ *     reads the family out of the id — an alias carrying one is routed and
++ *     counted as that family while actually going elsewhere;
++ *   - it SHOULD contain "claude" or "anthropic", because a Claude Code client
++ *     drops every other id before its model picker sees it.
++ *
++ * The first is an error, the second a warning: the first corrupts this proxy,
++ * the second only makes the alias invisible to one client among several. Both
++ * judgements come from `describeAliasIdProblem` in core, which the POST handler
++ * also calls — the rules are stated once.
++ *
++ * The model field is a plain input, not the ModelCombobox used on the
++ * provider-defaults screen: this modal grows a row per alias and therefore has
++ * to scroll, and ModelCombobox renders its popover without a portal precisely
++ * so it survives a modal — an `overflow-y-auto` ancestor would clip its list.
++ * A free-text field here is the honest trade: the id typed is the id sent.
++ */
++
++/** A row the user is editing, with a stable key so React can track deletions. */
++interface DraftRow extends CustomModelAliasRow {
++	key: string;
++}
++
++let rowCounter = 0;
++function newKey(): string {
++	rowCounter += 1;
++	return `alias-${rowCounter}`;
++}
++
++function toDrafts(rows: CustomModelAliasRow[]): DraftRow[] {
++	return rows.map((row) => ({ ...row, key: newKey() }));
++}
++
++function emptyRow(provider: string): DraftRow {
++	return {
++		key: newKey(),
++		id: "",
++		provider,
++		model: "",
++		displayName: "",
++		description: "",
++	};
++}
++
++/** Problems that block Save, keyed by row key. Empty means the form is sound. */
++function collectErrors(rows: DraftRow[]): Map<string, string> {
++	const errors = new Map<string, string>();
++	const seen = new Map<string, string>();
++	for (const row of rows) {
++		const id = row.id.trim();
++		if (!id) {
++			errors.set(row.key, "An alias needs an id.");
++			continue;
++		}
++		const previous = seen.get(id);
++		if (previous) {
++			// Whole-map replacement means a duplicate id does not error server
++			// side — the second silently wins. Catch it here, where the user can
++			// still see both rows.
++			errors.set(row.key, `Duplicate id: "${id}" is already used above.`);
++			continue;
++		}
++		seen.set(id, row.key);
++		const problem = describeAliasIdProblem(id);
++		if (problem?.level === "error") {
++			errors.set(row.key, problem.message);
++			continue;
++		}
++		if (!row.provider.trim()) {
++			errors.set(row.key, "Pick the provider that serves this model.");
++			continue;
++		}
++		if (!row.model.trim()) {
++			errors.set(row.key, "Name the model actually sent upstream.");
++		}
++	}
++	return errors;
++}
++
++/** Non-blocking notes, keyed by row key. */
++function collectWarnings(rows: DraftRow[]): Map<string, string> {
++	const warnings = new Map<string, string>();
++	for (const row of rows) {
++		const id = row.id.trim();
++		if (!id) continue;
++		const problem = describeAliasIdProblem(id);
++		if (problem?.level === "warning") warnings.set(row.key, problem.message);
++	}
++	return warnings;
++}
++
++function sameRows(a: DraftRow[], b: CustomModelAliasRow[]): boolean {
++	if (a.length !== b.length) return false;
++	return a.every((row, index) => {
++		const other = b[index];
++		return (
++			row.id === other.id &&
++			row.provider === other.provider &&
++			row.model === other.model &&
++			row.displayName === other.displayName &&
++			row.description === other.description
++		);
++	});
++}
++
++export function CustomModelAliasesDialog() {
++	const query = useCustomModelAliases();
++	const save = useSaveCustomModelAliases();
++	const accounts = useAccounts();
++	const [drafts, setDrafts] = useState<DraftRow[]>([]);
++
++	// Resynchronizes the draft whenever the query brings a fresh server
++	// snapshot: on initial load and after Save invalidates the query.
++	useEffect(() => {
++		if (!query.data) return;
++		setDrafts(toDrafts(query.data));
++	}, [query.data]);
++
++	// Providers that actually have an account configured. Offering the full
++	// list of provider names would let someone save an alias nothing can serve,
++	// which fails later as a 503 with no hint of why.
++	const providers = useMemo(() => {
++		const set = new Set<string>();
++		for (const account of accounts.data ?? []) {
++			if (account.provider) set.add(account.provider);
++		}
++		for (const row of drafts) {
++			// Never drop a provider an existing alias already names, even if its
++			// account has since been removed: hiding it would silently rewrite
++			// the alias on the next Save.
++			if (row.provider) set.add(row.provider);
++		}
++		return [...set].sort((a, b) => a.localeCompare(b));
++	}, [accounts.data, drafts]);
++
++	const errors = collectErrors(drafts);
++	const warnings = collectWarnings(drafts);
++	const dirty = query.data ? !sameRows(drafts, query.data) : false;
++	const disableFields = query.isLoading || save.isPending;
++
++	const update = (key: string, patch: Partial<CustomModelAliasRow>) => {
++		setDrafts((prev) =>
++			prev.map((row) => (row.key === key ? { ...row, ...patch } : row)),
++		);
++	};
++
++	const remove = (key: string) => {
++		setDrafts((prev) => prev.filter((row) => row.key !== key));
++	};
++
++	const add = () => {
++		setDrafts((prev) => [...prev, emptyRow(providers[0] ?? "")]);
++	};
++
++	const handleSave = () => {
++		if (errors.size > 0 || !dirty) return;
++		save.mutate(
++			drafts.map(({ key: _key, ...row }) => ({
++				...row,
++				id: row.id.trim(),
++				provider: row.provider.trim(),
++				model: row.model.trim(),
++			})),
++		);
++	};
++
++	return (
++		<Dialog>
++			<DialogTrigger asChild>
++				<Button variant="outline" size="sm">
++					Configure
++				</Button>
++			</DialogTrigger>
++			<DialogContent className="max-w-3xl">
++				<DialogHeader>
++					<DialogTitle>Custom Model Aliases</DialogTitle>
++					<DialogDescription>
++						A model id clients may ask for, standing for a real model on a
++						specific provider.
++					</DialogDescription>
++				</DialogHeader>
++
++				<p className="flex items-start gap-1.5 text-xs text-muted-foreground">
++					<Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
++					Resolved at ingress, before an account is picked: the alias is what
++					decides which accounts are eligible. Aliases are appended to{" "}
++					<code>/v1/models</code> after everything the upstream answered, never
++					in place of it.
++				</p>
++
++				{query.isLoading && (
++					<div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
++						<Loader2 className="h-4 w-4 animate-spin" />
++						Loading aliases...
++					</div>
++				)}
++
++				{query.isError && (
++					<p className="flex items-center gap-2 py-2 text-sm text-destructive">
++						<AlertCircle className="h-4 w-4 shrink-0" />
++						Could not load aliases.{" "}
++						{query.error instanceof Error
++							? query.error.message
++							: "unknown error"}
++					</p>
++				)}
++
++				{!query.isLoading && !query.isError && drafts.length === 0 && (
++					<p className="py-2 text-sm text-muted-foreground">
++						No alias configured. Nothing is added to <code>/v1/models</code>.
++					</p>
++				)}
++
++				{drafts.length > 0 && (
++					<div className="max-h-[50vh] space-y-3 overflow-y-auto pr-1">
++						{drafts.map((row) => {
++							const error = errors.get(row.key);
++							const warning = warnings.get(row.key);
++							return (
++								<div
++									key={row.key}
++									className="space-y-2 rounded-md border p-3 text-sm"
++								>
++									<div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto_1fr_auto]">
++										<div className="space-y-1">
++											<Label
++												htmlFor={`alias-id-${row.key}`}
++												className="text-xs"
++											>
++												Alias id (what the client asks for)
++											</Label>
++											<Input
++												id={`alias-id-${row.key}`}
++												value={row.id}
++												placeholder="claude-gpt-5.6-terra"
++												className="h-8"
++												disabled={disableFields}
++												onChange={(event) =>
++													update(row.key, { id: event.target.value })
++												}
++											/>
++										</div>
++										<div className="space-y-1">
++											<Label
++												htmlFor={`alias-provider-${row.key}`}
++												className="text-xs"
++											>
++												Provider
++											</Label>
++											<Select
++												value={row.provider || undefined}
++												disabled={disableFields}
++												onValueChange={(value) =>
++													update(row.key, { provider: value })
++												}
++											>
++												<SelectTrigger
++													id={`alias-provider-${row.key}`}
++													className="h-8 w-[10rem]"
++												>
++													<SelectValue placeholder="pick one" />
++												</SelectTrigger>
++												<SelectContent>
++													{providers.map((provider) => (
++														<SelectItem key={provider} value={provider}>
++															{provider}
++														</SelectItem>
++													))}
++												</SelectContent>
++											</Select>
++										</div>
++										<div className="space-y-1">
++											<Label
++												htmlFor={`alias-model-${row.key}`}
++												className="text-xs"
++											>
++												Model sent upstream
++											</Label>
++											<Input
++												id={`alias-model-${row.key}`}
++												value={row.model}
++												placeholder="gpt-5.6-terra"
++												className="h-8"
++												disabled={disableFields}
++												onChange={(event) =>
++													update(row.key, { model: event.target.value })
++												}
++											/>
++										</div>
++										<div className="flex items-end">
++											<Button
++												type="button"
++												variant="ghost"
++												size="sm"
++												title="Remove this alias"
++												disabled={disableFields}
++												onClick={() => remove(row.key)}
++											>
++												<Trash2 className="h-3.5 w-3.5" />
++											</Button>
++										</div>
++									</div>
++
++									<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
++										<div className="space-y-1">
++											<Label
++												htmlFor={`alias-display-${row.key}`}
++												className="text-xs"
++											>
++												Display name (optional)
++											</Label>
++											<Input
++												id={`alias-display-${row.key}`}
++												value={row.displayName}
++												placeholder={row.id.trim() || "falls back to the id"}
++												className="h-8"
++												disabled={disableFields}
++												onChange={(event) =>
++													update(row.key, { displayName: event.target.value })
++												}
++											/>
++										</div>
++										<div className="space-y-1">
++											<Label
++												htmlFor={`alias-description-${row.key}`}
++												className="text-xs"
++											>
++												Description (optional)
++											</Label>
++											<Input
++												id={`alias-description-${row.key}`}
++												value={row.description}
++												placeholder="shown next to the name in a picker"
++												className="h-8"
++												disabled={disableFields}
++												onChange={(event) =>
++													update(row.key, { description: event.target.value })
++												}
++											/>
++										</div>
++									</div>
++
++									{error && (
++										<p className="flex items-start gap-1.5 text-[11px] text-destructive">
++											<AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
++											{error}
++										</p>
++									)}
++									{!error && warning && (
++										<p className="flex items-start gap-1.5 text-[11px] text-yellow-600 dark:text-yellow-500">
++											<AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
++											{warning}
++										</p>
++									)}
++								</div>
++							);
++						})}
++					</div>
++				)}
++
++				<div className="flex items-center gap-2 pt-1">
++					<Button
++						type="button"
++						variant="outline"
++						size="sm"
++						onClick={add}
++						disabled={disableFields}
++					>
++						<Plus className="h-3.5 w-3.5" />
++						Add alias
++					</Button>
++					<Button
++						size="sm"
++						onClick={handleSave}
++						disabled={
++							!dirty || errors.size > 0 || save.isPending || query.isLoading
++						}
++					>
++						{save.isPending ? (
++							<>
++								<Loader2 className="h-3.5 w-3.5 animate-spin" />
++								Saving...
++							</>
++						) : (
++							<>
++								<Save className="h-3.5 w-3.5" />
++								Save
++							</>
++						)}
++					</Button>
++					{errors.size > 0 && (
++						<span className="text-xs text-destructive">
++							{errors.size} alias{errors.size === 1 ? "" : "es"} to fix
++						</span>
++					)}
++					{errors.size === 0 && dirty && !save.isPending && (
++						<span className="text-xs text-muted-foreground">
++							Unsaved changes
++						</span>
++					)}
++				</div>
++
++				{save.isError && (
++					<p className="flex items-center gap-2 text-xs text-destructive">
++						<AlertCircle className="h-3.5 w-3.5 shrink-0" />
++						Could not save.{" "}
++						{save.error instanceof Error ? save.error.message : "unknown error"}
++					</p>
++				)}
++			</DialogContent>
++		</Dialog>
++	);
++}
+diff --git a/packages/dashboard-web/src/hooks/useCustomModelAliases.ts b/packages/dashboard-web/src/hooks/useCustomModelAliases.ts
+new file mode 100644
+index 0000000..aae56d2
+--- /dev/null
++++ b/packages/dashboard-web/src/hooks/useCustomModelAliases.ts
+@@ -0,0 +1,38 @@
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import {
++	type CustomModelAliasRow,
++	fetchCustomModelAliases,
++	saveCustomModelAliases,
++} from "../lib/custom-model-aliases-api";
++import { queryKeys } from "../lib/query-keys";
++
++/**
++ * The custom model alias map. Few records: short staleTime only to avoid
++ * duplicate calls between re-renders, with no polling.
++ */
++export const useCustomModelAliases = () =>
++	useQuery({
++		queryKey: queryKeys.customModelAliases(),
++		queryFn: fetchCustomModelAliases,
++		staleTime: 30 * 1000,
++	});
++
++/**
++ * Saves the whole map edited on screen in one operation.
++ *
++ * Also invalidates the model queries: an alias is an id clients may now ask
++ * for, so the model listing the dashboard shows is stale the moment this
++ * succeeds.
++ */
++export const useSaveCustomModelAliases = () => {
++	const queryClient = useQueryClient();
++	return useMutation({
++		mutationFn: (rows: CustomModelAliasRow[]) => saveCustomModelAliases(rows),
++		onSuccess: () => {
++			queryClient.invalidateQueries({
++				queryKey: queryKeys.customModelAliases(),
++			});
++			queryClient.invalidateQueries({ queryKey: queryKeys.models() });
++		},
++	});
++};
+diff --git a/packages/dashboard-web/src/lib/custom-model-aliases-api.ts b/packages/dashboard-web/src/lib/custom-model-aliases-api.ts
+new file mode 100644
+index 0000000..bc57981
+--- /dev/null
++++ b/packages/dashboard-web/src/lib/custom-model-aliases-api.ts
+@@ -0,0 +1,100 @@
++import type { CustomModelAliases } from "@better-ccflare/core";
++import { api } from "../api";
++
++/**
++ * Adapter for ONE pair of endpoints: the custom model alias map, which lets a
++ * client ask for `claude-gpt-5.6-terra` and have `gpt-5.6-terra` sent to a
++ * `codex` account. It exists because a Claude Code client's model picker never
++ * sees an id failing `/(claude|anthropic)/i` — so without an alias there is no
++ * way to select a non-Claude model from that picker at all.
++ *
++ * Everything the dashboard knows about these response shapes lives here: if
++ * the backend changes the contract, this is the only file to update.
++ *
++ *   GET  /api/config/custom-model-aliases
++ *     -> { aliases: { "<alias id>": { provider, model, displayName?, description? } } }
++ *   POST /api/config/custom-model-aliases   body { aliases: {...} }
++ *     -> replaces the WHOLE map. Not a merge: a merge offers no way to delete
++ *        an alias, and an alias that cannot be deleted keeps sending traffic to
++ *        a provider the operator has stopped choosing.
++ *
++ * Authentication comes for free from the shared `api` client, which injects
++ * `x-api-key` into every request and opens the auth dialog on 401.
++ */
++
++/** One row as the screen edits it: the id travels alongside its value. */
++export interface CustomModelAliasRow {
++	id: string;
++	provider: string;
++	model: string;
++	displayName: string;
++	description: string;
++}
++
++function asRecord(raw: unknown): Record<string, unknown> {
++	return raw && typeof raw === "object" && !Array.isArray(raw)
++		? (raw as Record<string, unknown>)
++		: {};
++}
++
++function asString(raw: unknown): string {
++	return typeof raw === "string" ? raw.trim() : "";
++}
++
++/**
++ * The alias map as rows, sorted by id.
++ *
++ * An entry missing `provider` or `model` is dropped rather than shown half
++ * empty: it cannot route, so displaying it as if it could would be worse than
++ * admitting it is not there. Malformed input becomes an empty list.
++ */
++export async function fetchCustomModelAliases(): Promise<
++	CustomModelAliasRow[]
++> {
++	const body = asRecord(await api.get<unknown>("/api/config/custom-model-aliases"));
++	const aliases = asRecord(body.aliases);
++	const rows: CustomModelAliasRow[] = [];
++	for (const [id, raw] of Object.entries(aliases)) {
++		const entry = asRecord(raw);
++		const provider = asString(entry.provider);
++		const model = asString(entry.model);
++		if (!id.trim() || !provider || !model) continue;
++		rows.push({
++			id: id.trim(),
++			provider,
++			model,
++			displayName: asString(entry.displayName),
++			description: asString(entry.description),
++		});
++	}
++	return rows.sort((a, b) => a.id.localeCompare(b.id));
++}
++
++/**
++ * Saves the whole map in one operation, triggered by the Save button: this
++ * screen does not save on every keystroke.
++ *
++ * Optional fields are omitted when blank rather than sent as empty strings, so
++ * that a cleared Display Name goes back to falling through to the alias id
++ * instead of becoming an empty label in someone's model picker.
++ */
++export async function saveCustomModelAliases(
++	rows: CustomModelAliasRow[],
++): Promise<void> {
++	const aliases: CustomModelAliases = {};
++	for (const row of rows) {
++		const id = row.id.trim();
++		if (!id) continue;
++		aliases[id] = {
++			provider: row.provider.trim(),
++			model: row.model.trim(),
++			...(row.displayName.trim()
++				? { displayName: row.displayName.trim() }
++				: {}),
++			...(row.description.trim()
++				? { description: row.description.trim() }
++				: {}),
++		};
++	}
++	await api.post("/api/config/custom-model-aliases", { aliases });
++}
+diff --git a/packages/dashboard-web/src/lib/query-keys.ts b/packages/dashboard-web/src/lib/query-keys.ts
+index 603f3bf..5fd4e99 100644
+--- a/packages/dashboard-web/src/lib/query-keys.ts
++++ b/packages/dashboard-web/src/lib/query-keys.ts
+@@ -56,6 +56,10 @@ export const queryKeys = {
+ 	// and writes everything at once.
+ 	providerModelDefaults: () =>
+ 		[...queryKeys.all, "config", "provider-model-defaults"] as const,
++	// Single record for the custom model alias map. No parameter, same reason
++	// as above: the screen reads and writes the whole map at once.
++	customModelAliases: () =>
++		[...queryKeys.all, "config", "custom-model-aliases"] as const,
+ 	// One key per on/off config setting, named by its endpoint path so two
+ 	// settings can never share a cache entry.
+ 	configFlag: (path: string) =>
+diff --git a/packages/http-api/src/handlers/config.ts b/packages/http-api/src/handlers/config.ts
+index 9d9991c..53a4ac2 100644
+--- a/packages/http-api/src/handlers/config.ts
++++ b/packages/http-api/src/handlers/config.ts
+@@ -5,10 +5,13 @@ import {
+ } from "@better-ccflare/config";
+ import {
+ 	DEFAULT_AGENT_MODEL,
++	type CustomModelAliases,
++	describeAliasIdProblem,
+ 	KNOWN_PATTERNS,
+ 	NETWORK,
+ 	STRATEGIES,
+ 	type StrategyName,
++	setCustomModelAliases as setCustomModelAliasesRegistry,
+ 	setForceAccountModel as setForceAccountModelFlag,
+ 	TIME_CONSTANTS,
+ 	validateNumber,
+@@ -448,6 +451,70 @@ export function createConfigHandlers(
+ 			});
+ 		},
+ 
++		/**
++		 * GET /api/config/custom-model-aliases — the alias map as it stands.
++		 *
++		 * Reads the config rather than the in-memory registry so that the screen
++		 * shows what is persisted. The two agree in normal operation; when they
++		 * disagree, the config is the one that survives a restart, and that is the
++		 * answer an operator is asking for.
++		 */
++		getCustomModelAliases: (): Response => {
++			return jsonResponse({ aliases: config.getCustomModelAliases() });
++		},
++
++		/**
++		 * POST /api/config/custom-model-aliases — replace the whole alias map.
++		 *
++		 * Whole-map replacement, not a merge: a merge gives no way to delete an
++		 * alias, and an alias that cannot be deleted keeps routing traffic to a
++		 * provider the operator has stopped choosing.
++		 */
++		setCustomModelAliases: async (req: Request): Promise<Response> => {
++			const body = await req.json();
++			const raw = body?.aliases;
++			if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
++				return errorResponse(
++					BadRequest(
++						"Invalid payload: expected 'aliases' to be an object mapping alias id -> { provider, model }",
++					),
++				);
++			}
++			for (const [id, entry] of Object.entries(raw)) {
++				// Only "error" blocks. A "warning" means the id is invisible to a
++				// Claude Code model picker, which is a property of that one client —
++				// refusing it here would speak for clients we do not serve.
++				const problem = describeAliasIdProblem(id);
++				if (problem?.level === "error") {
++					return errorResponse(
++						BadRequest(`Invalid alias "${id}": ${problem.message}`),
++					);
++				}
++				if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
++					return errorResponse(
++						BadRequest(`Invalid alias "${id}": expected an object`),
++					);
++				}
++				const { provider, model } = entry as Record<string, unknown>;
++				if (typeof provider !== "string" || !provider.trim()) {
++					return errorResponse(
++						BadRequest(`Invalid alias "${id}": 'provider' is required`),
++					);
++				}
++				if (typeof model !== "string" || !model.trim()) {
++					return errorResponse(
++						BadRequest(`Invalid alias "${id}": 'model' is required`),
++					);
++				}
++			}
++			config.setCustomModelAliases(raw as CustomModelAliases);
++			// The effective value, after the config's own sanitization — the
++			// mirror must never claim more than the config does.
++			const effective = config.getCustomModelAliases();
++			setCustomModelAliasesRegistry(effective);
++			return jsonResponse({ success: true, aliases: effective });
++		},
++
+ 		setForceAccountModel: async (req: Request): Promise<Response> => {
+ 			const body = await req.json();
+ 			if (typeof body.enabled !== "boolean") {
+diff --git a/packages/http-api/src/handlers/models.ts b/packages/http-api/src/handlers/models.ts
+index a74e204..e353f15 100644
+--- a/packages/http-api/src/handlers/models.ts
++++ b/packages/http-api/src/handlers/models.ts
+@@ -1,5 +1,6 @@
+ import {
+ 	listCatalogueModels,
++	listModelAliases,
+ 	validateApiKey,
+ 	validateEndpointUrl,
+ } from "@better-ccflare/core";
+@@ -33,7 +34,16 @@ export type ModelListingSource =
+ 	 * tell an entitled model from one the plan does not reach — which is the
+ 	 * distinction that matters when the choice ends up in a request.
+ 	 */
+-	| "account";
++	| "account"
++	/**
++	 * A registered custom model alias. Says the operator declared this id and
++	 * what it resolves to — and says nothing at all about entitlement, exactly
++	 * like "reference": the alias target still has to be serveable by some
++	 * account of the provider the alias names. Never collapse it into
++	 * "account" or "catalog", which are claims about a provider, not about
++	 * local configuration.
++	 */
++	| "alias";
+ 
+ export interface ProviderModelEntry {
+ 	id: string;
+@@ -75,10 +85,11 @@ function isAnthropicProvider(provider: string): boolean {
+  * GET /api/models[?provider=<name>] — list the models available for one
+  * provider, each entry tagged with where the knowledge came from.
+  *
+- * Without `provider` (and for the Anthropic providers) the body is exactly
+- * what this endpoint has always returned — the cached live catalog, or the
+- * bundled static fallback — so existing callers keep working; `provider` and
+- * the per-entry `source` are purely additive fields.
++ * Without `provider` (and for the Anthropic providers) the body is what this
++ * endpoint has always returned — the cached live catalog, or the bundled
++ * static fallback — plus any registered custom model alias, tagged
++ * `source: "alias"`. `provider` and the per-entry `source` are additive
++ * fields, and an alias never displaces a catalog entry.
+  *
+  * For every other provider the answer is the union of what ccflare knows
+  * built in and what the public models.dev catalogue lists, deduplicated by
+@@ -138,6 +149,19 @@ export function createModelsHandler(context: APIContext) {
+ 			}
+ 		}
+ 
++		// Registered aliases, rendered in this endpoint's vocabulary. Appended
++		// to whichever branch answers below rather than replacing anything: an
++		// alias is additional knowledge, never a correction of the provider's.
++		const aliasEntries: ProviderModelEntry[] = Object.entries(
++			listModelAliases(),
++		)
++			.filter(([, alias]) => !requested || alias.provider === requested)
++			.map(([id, alias]) => ({
++				id,
++				displayName: alias.displayName ?? id,
++				source: "alias" as const,
++			}));
++
+ 		if (requested === "" || isAnthropicProvider(requested)) {
+ 			if (!context.modelCatalog) {
+ 				return errorResponse("Model catalog is not available");
+@@ -150,11 +174,14 @@ export function createModelsHandler(context: APIContext) {
+ 			return jsonResponse({
+ 				provider: requested || "anthropic",
+ 				models: live
+-					? catalog.models.map((model) => ({
+-							...model,
+-							source: "catalog" as const,
+-						}))
+-					: [],
++					? [
++							...catalog.models.map((model) => ({
++								...model,
++								source: "catalog" as const,
++							})),
++							...aliasEntries,
++						]
++					: aliasEntries,
+ 				fetchedAt: catalog.fetchedAt,
+ 				source: live ? "live" : "unavailable",
+ 				...(live
+@@ -191,7 +218,14 @@ export function createModelsHandler(context: APIContext) {
+ 		const referenceEntries = Array.from(referenceById.values()).sort((a, b) =>
+ 			a.id.localeCompare(b.id),
+ 		);
+-		const models = [...builtinById.values(), ...referenceEntries];
++		// Aliases sit between builtin and reference: the operator declared them
++		// explicitly, which outranks a public catalogue's say-so, but they are
++		// still not the provider's own word about entitlement.
++		const models = [
++			...builtinById.values(),
++			...aliasEntries,
++			...referenceEntries,
++		];
+ 
+ 		const hasBuiltin = builtinById.size > 0;
+ 		const hasReference = referenceEntries.length > 0;
+@@ -201,7 +235,9 @@ export function createModelsHandler(context: APIContext) {
+ 				: "builtin"
+ 			: hasReference
+ 				? "reference"
+-				: "unavailable";
++				: aliasEntries.length > 0
++					? "alias"
++					: "unavailable";
+ 
+ 		return jsonResponse({
+ 			provider: requested,
+diff --git a/packages/http-api/src/router.ts b/packages/http-api/src/router.ts
+index 24b4634..7a4de9d 100644
+--- a/packages/http-api/src/router.ts
++++ b/packages/http-api/src/router.ts
+@@ -450,6 +450,12 @@ export class APIRouter {
+ 		this.handlers.set("POST:/api/config/force-account-model", (req) =>
+ 			configHandlers.setForceAccountModel(req),
+ 		);
++		this.handlers.set("GET:/api/config/custom-model-aliases", () =>
++			configHandlers.getCustomModelAliases(),
++		);
++		this.handlers.set("POST:/api/config/custom-model-aliases", (req) =>
++			configHandlers.setCustomModelAliases(req),
++		);
+ 		this.handlers.set("POST:/api/maintenance/cleanup", () => cleanupHandler());
+ 		this.handlers.set("GET:/api/system/info", () => systemInfoHandler());
+ 		this.handlers.set("GET:/api/version/check", () => versionCheckHandler());
+diff --git a/packages/http-api/src/services/model-validation.ts b/packages/http-api/src/services/model-validation.ts
+index 42aeefc..11ce1e6 100644
+--- a/packages/http-api/src/services/model-validation.ts
++++ b/packages/http-api/src/services/model-validation.ts
+@@ -1,5 +1,6 @@
+ import {
+ 	getAllowedModelsMessage,
++	isRegisteredAlias,
+ 	isValidClaudeModel,
+ } from "@better-ccflare/core";
+ import type { APIContext } from "@better-ccflare/types";
+@@ -21,6 +22,10 @@ export async function isAllowedModel(
+ 	modelCatalog?: APIContext["modelCatalog"],
+ ): Promise<boolean> {
+ 	if (isValidClaudeModel(model)) return true;
++	// A registered alias carries no family word and will never appear in the
++	// Anthropic catalog — both checks below would reject it. The operator put
++	// it in the config, which is a stronger statement than either.
++	if (isRegisteredAlias(model)) return true;
+ 	if (!modelCatalog) return false;
+ 	try {
+ 		const catalog = await modelCatalog.get();
+@@ -32,5 +37,5 @@ export async function isAllowedModel(
+ }
+ 
+ export function allowedModelErrorMessage(): string {
+-	return `${getAllowedModelsMessage()} — or any model id present in the live Anthropic model catalog.`;
++	return `${getAllowedModelsMessage()} — or any model id present in the live Anthropic model catalog, or a registered custom model alias.`;
+ }
+diff --git a/packages/proxy/src/__tests__/models-listing-merge.test.ts b/packages/proxy/src/__tests__/models-listing-merge.test.ts
+new file mode 100644
+index 0000000..cd2bc83
+--- /dev/null
++++ b/packages/proxy/src/__tests__/models-listing-merge.test.ts
+@@ -0,0 +1,201 @@
++import { afterAll, beforeEach, describe, expect, test } from "bun:test";
++import { setCustomModelAliases } from "@better-ccflare/core";
++import {
++	MAX_MODELS_LISTING_MERGE_BYTES,
++	mergeModelsListingBody,
++	mergeModelsListingStream,
++} from "../models-listing-merge";
++
++const ALIASES = {
++	"claude-gpt-5.6-sol": {
++		provider: "codex",
++		model: "gpt-5.6-sol",
++		displayName: "Sol xhigh",
++		description: "Codex via alias",
++	},
++};
++
++function upstreamStream(text: string): ReadableStream<Uint8Array> {
++	return new Response(text).body as ReadableStream<Uint8Array>;
++}
++
++async function readAll(stream: ReadableStream<Uint8Array>): Promise<string> {
++	return await new Response(stream).text();
++}
++
++beforeEach(() => {
++	setCustomModelAliases({});
++});
++
++// The registry is process-global by design (see model-aliases.ts). Leaving it
++// populated would reach every test file that runs after this one in the same
++// bun process — which is exactly how this cleanup came to be written.
++afterAll(() => {
++	setCustomModelAliases({});
++});
++
++describe("mergeModelsListingBody", () => {
++	test("keeps every upstream entry, in order, and appends the alias", () => {
++		setCustomModelAliases(ALIASES);
++		const upstream = {
++			data: [
++				{ type: "model", id: "claude-opus-5", display_name: "Opus 5" },
++				{ type: "model", id: "claude-sonnet-5", display_name: "Sonnet 5" },
++			],
++			has_more: false,
++			first_id: "claude-opus-5",
++		};
++
++		const merged = mergeModelsListingBody(JSON.stringify(upstream));
++		expect(merged).not.toBeNull();
++		const parsed = JSON.parse(merged as string);
++
++		// The contract: a superset, upstream first and untouched.
++		expect(parsed.data.slice(0, 2)).toEqual(upstream.data);
++		expect(parsed.has_more).toBe(false);
++		expect(parsed.first_id).toBe("claude-opus-5");
++		expect(parsed.data).toHaveLength(3);
++		expect(parsed.data[2]).toEqual({
++			type: "model",
++			id: "claude-gpt-5.6-sol",
++			display_name: "Sol xhigh",
++			description: "Codex via alias",
++		});
++	});
++
++	test("upstream wins a collision — an alias never displaces a real entry", () => {
++		setCustomModelAliases({
++			"claude-sonnet-5": {
++				provider: "codex",
++				model: "gpt-5.6-sol",
++				displayName: "Impostor",
++			},
++		});
++		const upstream = {
++			data: [{ type: "model", id: "claude-sonnet-5", display_name: "Sonnet 5" }],
++		};
++
++		expect(mergeModelsListingBody(JSON.stringify(upstream))).toBeNull();
++	});
++
++	test("adds the Anthropic catalog so the answering account cannot narrow the list", () => {
++		setCustomModelAliases({});
++		const merged = mergeModelsListingBody(
++			JSON.stringify({ data: [{ type: "model", id: "gpt-5.6-sol" }] }),
++			{
++				catalogEntries: [{ id: "claude-opus-5", displayName: "Opus 5" }],
++			},
++		);
++		const parsed = JSON.parse(merged as string);
++		expect(parsed.data.map((m: { id: string }) => m.id)).toEqual([
++			"gpt-5.6-sol",
++			"claude-opus-5",
++		]);
++	});
++
++	test("mirrors additions into a Codex listing's duplicate `models` key", () => {
++		// Measured against a real Codex answer: it carries the same array twice.
++		setCustomModelAliases(ALIASES);
++		const merged = mergeModelsListingBody(
++			JSON.stringify({
++				object: "list",
++				data: [{ id: "gpt-5.6-terra" }],
++				models: [{ id: "gpt-5.6-terra" }],
++			}),
++		);
++		const parsed = JSON.parse(merged as string);
++		expect(parsed.data.map((m: { id: string }) => m.id)).toEqual(
++			parsed.models.map((m: { id: string }) => m.id),
++		);
++		expect(parsed.models.map((m: { id: string }) => m.id)).toContain(
++			"claude-gpt-5.6-sol",
++		);
++	});
++
++	test("leaves a listing without a `models` key alone", () => {
++		setCustomModelAliases(ALIASES);
++		const merged = mergeModelsListingBody(
++			JSON.stringify({ data: [{ id: "claude-opus-5" }] }),
++		);
++		expect(JSON.parse(merged as string).models).toBeUndefined();
++	});
++
++	test("returns null when there is nothing to add", () => {
++		expect(mergeModelsListingBody(JSON.stringify({ data: [] }))).toBeNull();
++	});
++
++	test("returns null for a body that is not a listing", () => {
++		setCustomModelAliases(ALIASES);
++		expect(mergeModelsListingBody("not json")).toBeNull();
++		expect(mergeModelsListingBody(JSON.stringify({ error: "nope" }))).toBeNull();
++		expect(mergeModelsListingBody(JSON.stringify([1, 2]))).toBeNull();
++	});
++
++	test("survives the (claude|anthropic) filter a Claude Code client applies", () => {
++		// Not a test of our code so much as of the naming rule it exists to
++		// satisfy: the client drops every id failing this regex before its model
++		// picker sees it, so an alias that does not match is invisible no matter
++		// how correctly we serve it.
++		setCustomModelAliases(ALIASES);
++		const merged = mergeModelsListingBody(JSON.stringify({ data: [] }), {
++			catalogEntries: [{ id: "claude-opus-5" }],
++		});
++		const parsed = JSON.parse(merged as string);
++		const survivors = parsed.data.filter((m: { id: string }) =>
++			/(claude|anthropic)/i.test(m.id),
++		);
++		expect(survivors.map((m: { id: string }) => m.id)).toContain(
++			"claude-gpt-5.6-sol",
++		);
++	});
++});
++
++describe("mergeModelsListingStream", () => {
++	test("emits the merged body", async () => {
++		setCustomModelAliases(ALIASES);
++		const out = await readAll(
++			mergeModelsListingStream(
++				upstreamStream(JSON.stringify({ data: [{ id: "claude-opus-5" }] })),
++			),
++		);
++		const parsed = JSON.parse(out);
++		expect(parsed.data.map((m: { id: string }) => m.id)).toEqual([
++			"claude-opus-5",
++			"claude-gpt-5.6-sol",
++		]);
++	});
++
++	test("forwards an unparseable body byte-for-byte", async () => {
++		setCustomModelAliases(ALIASES);
++		const body = '{"error":{"message":"upstream said no"}}';
++		expect(await readAll(mergeModelsListingStream(upstreamStream(body)))).toBe(
++			body,
++		);
++	});
++
++	test("forwards an oversized body unmerged rather than truncating it", async () => {
++		setCustomModelAliases(ALIASES);
++		const filler = "x".repeat(MAX_MODELS_LISTING_MERGE_BYTES + 1024);
++		const body = JSON.stringify({ data: [{ id: "claude-opus-5" }], filler });
++		expect(await readAll(mergeModelsListingStream(upstreamStream(body)))).toBe(
++			body,
++		);
++	});
++
++	test("a failing extras loader degrades to aliases only", async () => {
++		setCustomModelAliases(ALIASES);
++		const out = await readAll(
++			mergeModelsListingStream(
++				upstreamStream(JSON.stringify({ data: [{ id: "claude-opus-5" }] })),
++				async () => {
++					throw new Error("catalog unavailable");
++				},
++			),
++		);
++		const parsed = JSON.parse(out);
++		expect(parsed.data.map((m: { id: string }) => m.id)).toEqual([
++			"claude-opus-5",
++			"claude-gpt-5.6-sol",
++		]);
++	});
++});
+diff --git a/packages/proxy/src/handlers/__tests__/agent-interceptor.alias.test.ts b/packages/proxy/src/handlers/__tests__/agent-interceptor.alias.test.ts
+new file mode 100644
+index 0000000..3d1f75e
+--- /dev/null
++++ b/packages/proxy/src/handlers/__tests__/agent-interceptor.alias.test.ts
+@@ -0,0 +1,110 @@
++import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
++import { existsSync, unlinkSync } from "node:fs";
++import * as os from "node:os";
++import * as path from "node:path";
++import { setCustomModelAliases } from "@better-ccflare/core";
++import {
++	DatabaseFactory,
++	type DatabaseOperations,
++} from "@better-ccflare/database";
++import type { ModelCatalog } from "../../model-catalog";
++import {
++	interceptAndModifyRequest,
++	isRewriteTargetServable,
++} from "../agent-interceptor";
++
++const TEST_DB_PATH = path.join(os.tmpdir(), "bcf-interceptor-alias-test.db");
++
++const ALIASES = {
++	"claude-gpt-5.6-sol": { provider: "codex", model: "gpt-5.6-sol" },
++};
++
++function bodyFor(model: string): ArrayBuffer {
++	const json = JSON.stringify({
++		model,
++		messages: [{ role: "user", content: "oi" }],
++	});
++	return new TextEncoder().encode(json).buffer as ArrayBuffer;
++}
++
++function modelOf(buffer: ArrayBuffer | null): string | null {
++	if (!buffer) return null;
++	return JSON.parse(new TextDecoder().decode(buffer)).model;
++}
++
++describe("interceptAndModifyRequest - registered model aliases", () => {
++	let dbOps: DatabaseOperations;
++
++	beforeAll(() => {
++		if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
++		DatabaseFactory.initialize(TEST_DB_PATH);
++		dbOps = DatabaseFactory.getInstance();
++	});
++
++	afterAll(() => {
++		if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
++		DatabaseFactory.reset();
++		// Process-global registry: hand it back empty or every later test file
++		// in this bun process inherits these aliases.
++		setCustomModelAliases({});
++	});
++
++	beforeEach(() => {
++		setCustomModelAliases(ALIASES);
++	});
++
++	test("the alias id is replaced in the outgoing body by the real model", async () => {
++		const result = await interceptAndModifyRequest(
++			bodyFor("claude-gpt-5.6-sol"),
++			dbOps,
++		);
++		expect(modelOf(result.modifiedBody)).toBe("gpt-5.6-sol");
++	});
++
++	test("routing sees the real model while the log keeps what the client sent", async () => {
++		const result = await interceptAndModifyRequest(
++			bodyFor("claude-gpt-5.6-sol"),
++			dbOps,
++		);
++		// appliedModel is what account selection routes on; originalModel is the
++		// only record that the client ever said "claude-gpt-5.6-sol".
++		expect(result.appliedModel).toBe("gpt-5.6-sol");
++		expect(result.originalModel).toBe("claude-gpt-5.6-sol");
++	});
++
++	test("the alias names the provider that must serve the request", async () => {
++		const result = await interceptAndModifyRequest(
++			bodyFor("claude-gpt-5.6-sol"),
++			dbOps,
++		);
++		expect(result.aliasProvider).toBe("codex");
++	});
++
++	test("an unregistered id is left completely alone", async () => {
++		const buffer = bodyFor("claude-opus-5");
++		const result = await interceptAndModifyRequest(buffer, dbOps);
++		expect(result.appliedModel).toBe("claude-opus-5");
++		expect(result.aliasProvider).toBeNull();
++		expect(result.modifiedBody).toBe(buffer);
++	});
++
++	test("an empty registry restores today's behaviour exactly", async () => {
++		setCustomModelAliases({});
++		const buffer = bodyFor("claude-gpt-5.6-sol");
++		const result = await interceptAndModifyRequest(buffer, dbOps);
++		expect(result.appliedModel).toBe("claude-gpt-5.6-sol");
++		expect(result.modifiedBody).toBe(buffer);
++	});
++
++	test("a live catalog does not veto a registered alias", () => {
++		// Without the alias exemption this is a veto: the id carries no family
++		// word and the live catalog has never heard of it.
++		const catalog: ModelCatalog = {
++			models: [{ id: "claude-opus-5", displayName: "Opus 5", createdAt: null }],
++			fetchedAt: Date.now(),
++			source: "live",
++		};
++		expect(isRewriteTargetServable(catalog, "claude-gpt-5.6-sol")).toBe(true);
++		expect(isRewriteTargetServable(catalog, "gpt-5.6-sol")).toBe(false);
++	});
++});
+diff --git a/packages/proxy/src/handlers/account-selector.ts b/packages/proxy/src/handlers/account-selector.ts
+index 6d22f13..cd0318e 100644
+--- a/packages/proxy/src/handlers/account-selector.ts
++++ b/packages/proxy/src/handlers/account-selector.ts
+@@ -113,6 +113,29 @@ export function getXaiConvId(meta: RequestMeta): string | null {
+ 	return xaiConvIdMap.get(meta) ?? null;
+ }
+ 
++// ── Registered model alias: the provider that must serve this request ──────
++//
++// Same WeakMap treatment as the two above, and for the same reason. Set by
++// proxy.ts when the interceptor resolved the client's model id through a
++// registered alias (see core/src/model-aliases.ts); read only by the
++// candidate filter below.
++//
++// This cannot be recovered from the model name later: by the time selection
++// runs, the alias has already been replaced by the real model id, and two
++// aliases may point at the same model on different providers. The alias is
++// the only place the provider was ever stated, so it has to be carried.
++const aliasProviderMap = new WeakMap<RequestMeta, string>();
++
++/** Record that this request arrived through an alias served by `provider`. */
++export function setAliasProvider(meta: RequestMeta, provider: string): void {
++	aliasProviderMap.set(meta, provider);
++}
++
++/** The alias provider for this request, or null when no alias was involved. */
++export function getAliasProvider(meta: RequestMeta): string | null {
++	return aliasProviderMap.get(meta) ?? null;
++}
++
+ /**
+  * Sticky conv-id -> account ownership table for xAI cache-native affinity.
+  *
+@@ -869,6 +892,28 @@ export async function selectAccountsForRequest(
+ 		}
+ 	}
+ 
++	// Registered alias: keep only accounts of the provider the alias names.
++	//
++	// The model id reaching this point is the real one (`gpt-5.6-sol`), because
++	// the interceptor already resolved the alias. Without this filter an
++	// Anthropic account could win the ordering and be handed a model id it has
++	// never heard of — the alias would "work" right up to an upstream 400.
++	// Emptying the list is the correct outcome when no account of that provider
++	// is available: the operator named a provider, and serving the request from
++	// a different one is the substitution aliases exist to avoid.
++	const aliasProvider = getAliasProvider(meta);
++	if (aliasProvider) {
++		const before = orderedAccounts.length;
++		orderedAccounts = orderedAccounts.filter(
++			(account) => account.provider === aliasProvider,
++		);
++		if (orderedAccounts.length !== before) {
++			log.info(
++				`Model alias: ${orderedAccounts.length}/${before} account(s) on provider "${aliasProvider}" can serve "${model}"`,
++			);
++		}
++	}
++
+ 	// Model-scoped capacity filter for the non-combo (or combo-inactive/
+ 	// combo-exhausted-fallthrough) path: drop accounts whose weekly per-model
+ 	// cap for this model's family is exhausted. Only when the filter empties
+diff --git a/packages/proxy/src/handlers/agent-interceptor.ts b/packages/proxy/src/handlers/agent-interceptor.ts
+index 06578fc..0fd55d8 100644
+--- a/packages/proxy/src/handlers/agent-interceptor.ts
++++ b/packages/proxy/src/handlers/agent-interceptor.ts
+@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
+ import { homedir } from "node:os";
+ import { join } from "node:path";
+ import { agentRegistry } from "@better-ccflare/agents";
++import { isRegisteredAlias, resolveModelAlias } from "@better-ccflare/core";
+ import type { DatabaseOperations } from "@better-ccflare/database";
+ import { Logger } from "@better-ccflare/logger";
+ import { validatePath } from "@better-ccflare/security";
+@@ -17,6 +18,12 @@ export interface AgentInterceptResult {
+ 	originalModel: string | null;
+ 	appliedModel: string | null;
+ 	agentAttributionSource: AgentAttributionSource;
++	/**
++	 * Provider named by the registered alias the client asked for, or null when
++	 * the request did not come in through one. Account selection needs it:
++	 * `appliedModel` alone carries the resolved model but not who serves it.
++	 */
++	aliasProvider?: string | null;
+ }
+ 
+ /**
+@@ -31,6 +38,11 @@ export function isRewriteTargetServable(
+ 	catalog: ModelCatalog | null | undefined,
+ 	model: string,
+ ): boolean {
++	// A registered alias is never in the Anthropic catalog — it is not an
++	// Anthropic model, which is the entire point of registering it. The
++	// operator has already vouched for this id by putting it in the config, so
++	// the catalog has nothing to add and its silence must not be read as a veto.
++	if (isRegisteredAlias(model)) return true;
+ 	if (!catalog) return true;
+ 	if (catalog.source !== "live") return true;
+ 	if (catalog.models.length === 0) return true;
+@@ -88,6 +100,14 @@ export async function interceptAndModifyRequest(
+ 	// the original model (best-effort) instead of resetting it to null.
+ 	let originalModel: string | null = null;
+ 
++	// Same reasoning, one step further: once an alias has been resolved the
++	// body no longer holds the id the client sent, so a failure after that
++	// point must still report — and still forward — the resolved form. A catch
++	// that fell back to the untouched buffer would put the alias id on the
++	// wire, where no upstream knows it.
++	let aliasProvider: string | null = null;
++	let aliasedModel: string | null = null;
++
+ 	try {
+ 		const parsedBody = bodyContext.getParsedJson();
+ 		if (!parsedBody) {
+@@ -98,6 +118,30 @@ export async function interceptAndModifyRequest(
+ 		originalModel =
+ 			typeof parsedBody.model === "string" ? parsedBody.model : null;
+ 
++		// Resolve a registered alias before anything else looks at the model.
++		//
++		// Order matters: every step below — agent preference, the catalog veto,
++		// and account selection downstream — reasons about a model id that has
++		// to be real by then. Resolving here means an alias is indistinguishable
++		// from the client having asked for the real model in the first place,
++		// which is exactly the promise an alias makes, and it keeps the rest of
++		// the pipeline free of alias-awareness.
++		//
++		// `originalModel` deliberately keeps the alias id: it is what the client
++		// actually sent, and the request log is the one place that distinction
++		// is worth preserving.
++		if (originalModel) {
++			const alias = resolveModelAlias(originalModel);
++			if (alias) {
++				log.info(
++					`Model alias ${originalModel} -> ${alias.model} (provider ${alias.provider})`,
++				);
++				bodyContext.setModel(alias.model);
++				aliasProvider = alias.provider;
++				aliasedModel = alias.model;
++			}
++		}
++
+ 		// Explicit agent attribution via header (vendor-neutral): lets any client —
+ 		// a multi-agent orchestrator, a router, an SDK wrapper — declare which agent
+ 		// issued the request, so downstream observability tools can attribute usage
+@@ -155,6 +199,11 @@ export async function interceptAndModifyRequest(
+ 						originalModel,
+ 						appliedModel: preferredModel,
+ 						agentAttributionSource: "header_agent",
++						// The agent preference replaced the alias's model outright, so the
++						// alias no longer says anything about who should serve this
++						// request: constraining selection to its provider would strand a
++						// Claude preference on a Codex account.
++						aliasProvider: null,
+ 					};
+ 				}
+ 				log.warn(
+@@ -162,11 +211,12 @@ export async function interceptAndModifyRequest(
+ 				);
+ 			}
+ 			return {
+-				modifiedBody: requestBodyBuffer,
++				modifiedBody: aliasedModel ? bodyContext.getBuffer() : requestBodyBuffer,
+ 				agentUsed: explicitAgentId,
+ 				originalModel,
+-				appliedModel: originalModel,
++				appliedModel: aliasedModel ?? originalModel,
+ 				agentAttributionSource: "header_agent",
++				aliasProvider,
+ 			};
+ 		}
+ 
+@@ -182,11 +232,12 @@ export async function interceptAndModifyRequest(
+ 			// through unchanged.
+ 			log.debug(`Session attributed via header: ${sessionHeaderId}`);
+ 			return {
+-				modifiedBody: requestBodyBuffer,
++				modifiedBody: aliasedModel ? bodyContext.getBuffer() : requestBodyBuffer,
+ 				agentUsed: sessionHeaderId,
+ 				originalModel,
+-				appliedModel: originalModel,
++				appliedModel: aliasedModel ?? originalModel,
+ 				agentAttributionSource: "session_header",
++				aliasProvider,
+ 			};
+ 		};
+ 
+@@ -198,11 +249,12 @@ export async function interceptAndModifyRequest(
+ 			const fallback = sessionFallback();
+ 			if (fallback) return fallback;
+ 			return {
+-				modifiedBody: requestBodyBuffer,
++				modifiedBody: aliasedModel ? bodyContext.getBuffer() : requestBodyBuffer,
+ 				agentUsed: null,
+ 				originalModel,
+-				appliedModel: originalModel,
++				appliedModel: aliasedModel ?? originalModel,
+ 				agentAttributionSource: "none",
++				aliasProvider,
+ 			};
+ 		}
+ 
+@@ -274,11 +326,12 @@ export async function interceptAndModifyRequest(
+ 			const fallback = sessionFallback();
+ 			if (fallback) return fallback;
+ 			return {
+-				modifiedBody: requestBodyBuffer,
++				modifiedBody: aliasedModel ? bodyContext.getBuffer() : requestBodyBuffer,
+ 				agentUsed: null,
+ 				originalModel,
+-				appliedModel: originalModel,
++				appliedModel: aliasedModel ?? originalModel,
+ 				agentAttributionSource: "none",
++				aliasProvider,
+ 			};
+ 		}
+ 
+@@ -309,11 +362,12 @@ export async function interceptAndModifyRequest(
+ 		// modification is needed. agentUsed is still reported for attribution.
+ 		if (!preferredModel || preferredModel === originalModel) {
+ 			return {
+-				modifiedBody: requestBodyBuffer,
++				modifiedBody: aliasedModel ? bodyContext.getBuffer() : requestBodyBuffer,
+ 				agentUsed: detectedAgent.id,
+ 				originalModel,
+-				appliedModel: originalModel,
++				appliedModel: aliasedModel ?? originalModel,
+ 				agentAttributionSource: "prompt_agent",
++				aliasProvider,
+ 			};
+ 		}
+ 
+@@ -323,11 +377,12 @@ export async function interceptAndModifyRequest(
+ 				`Agent ${detectedAgent.id} prefers model ${preferredModel} which is not in the live model list — passing through ${originalModel}`,
+ 			);
+ 			return {
+-				modifiedBody: requestBodyBuffer,
++				modifiedBody: aliasedModel ? bodyContext.getBuffer() : requestBodyBuffer,
+ 				agentUsed: detectedAgent.id,
+ 				originalModel,
+-				appliedModel: originalModel,
++				appliedModel: aliasedModel ?? originalModel,
+ 				agentAttributionSource: "prompt_agent",
++				aliasProvider,
+ 			};
+ 		}
+ 
+@@ -341,6 +396,9 @@ export async function interceptAndModifyRequest(
+ 			originalModel,
+ 			appliedModel: preferredModel,
+ 			agentAttributionSource: "prompt_agent",
++			// See the header_agent return above: a preference rewrite supersedes
++			// the alias, provider included.
++			aliasProvider: null,
+ 		};
+ 	} catch (error) {
+ 		log.error("Failed to intercept/modify request:", error);
+@@ -348,11 +406,12 @@ export async function interceptAndModifyRequest(
+ 		// been extracted before the failure (best-effort) — preserve it
+ 		// instead of resetting to null so downstream routing still sees it.
+ 		return {
+-			modifiedBody: requestBodyBuffer,
++			modifiedBody: aliasedModel ? bodyContext.getBuffer() : requestBodyBuffer,
+ 			agentUsed: null,
+ 			originalModel,
+-			appliedModel: originalModel,
++			appliedModel: aliasedModel ?? originalModel,
+ 			agentAttributionSource: "none",
++			aliasProvider,
+ 		};
+ 	}
+ }
+diff --git a/packages/proxy/src/handlers/index.ts b/packages/proxy/src/handlers/index.ts
+index b57e9b4..34c9ad6 100644
+--- a/packages/proxy/src/handlers/index.ts
++++ b/packages/proxy/src/handlers/index.ts
+@@ -3,6 +3,7 @@ export {
+ 	type RequestJsonBody,
+ } from "../request-body-context";
+ export {
++	getAliasProvider,
+ 	getComboSlotInfo,
+ 	getModelFamilyExhaustionInfo,
+ 	getXaiConvId,
+@@ -12,6 +13,7 @@ export {
+ 	recordXaiAffinitySuccess,
+ 	resolveEffectiveModel,
+ 	selectAccountsForRequest,
++	setAliasProvider,
+ 	setComboSlotInfo,
+ 	setModelFamilyExhaustionInfo,
+ 	setXaiConvId,
+diff --git a/packages/proxy/src/models-listing-merge.ts b/packages/proxy/src/models-listing-merge.ts
+new file mode 100644
+index 0000000..b02f968
+--- /dev/null
++++ b/packages/proxy/src/models-listing-merge.ts
+@@ -0,0 +1,229 @@
++import { listModelAliases } from "@better-ccflare/core";
++import { Logger } from "@better-ccflare/logger";
++
++const log = new Logger("ModelsListingMerge");
++
++/**
++ * A listing entry as clients expect to read it. Anthropic's own `/v1/models`
++ * entries carry more (`created_at`, and whatever it adds later); this is only
++ * the shape this module *writes*, never a constraint on what it passes through.
++ */
++export interface ModelsListingEntry {
++	type: "model";
++	id: string;
++	display_name: string;
++	description?: string;
++}
++
++/**
++ * Upper bound on a listing body we are willing to buffer in order to merge.
++ * A larger body is forwarded byte-for-byte, unmerged.
++ *
++ * 4 MB, and the number is measured rather than guessed. A Codex account's real
++ * `/v1/models` answer on 2026-09-28 was 419 KB for **four** models: each entry
++ * carries ~80 KB of per-model configuration, and the body repeats the whole
++ * array under both `data` and `models`. A 256 KB bound — the figure this
++ * started at, borrowed from the response tee — silently skipped the merge on
++ * the very first real response it saw. The headroom is for an account that
++ * lists twenty of those, not for comfort.
++ *
++ * Buffering this much is acceptable here and nowhere else: a client fetches its
++ * model list at startup, not per message.
++ */
++export const MAX_MODELS_LISTING_MERGE_BYTES = 4 * 1024 * 1024;
++
++/**
++ * Entries to add to whatever the upstream answered.
++ *
++ * Registered aliases come first and last in importance: they are the reason
++ * this merge exists. `catalogEntries` carries the Anthropic models the Claude
++ * accounts serve, so that a client whose request happened to be answered by a
++ * Codex account still sees the Claude models it can ask for — without it, the
++ * listing a client caches would depend on which account won the load balancer,
++ * which is nobody's intent.
++ */
++export interface ModelsListingExtras {
++	catalogEntries?: ReadonlyArray<{
++		id: string;
++		displayName?: string;
++		description?: string;
++	}>;
++}
++
++/** Registered aliases rendered as listing entries. */
++export function aliasListingEntries(): ModelsListingEntry[] {
++	return Object.entries(listModelAliases()).map(([id, alias]) => ({
++		type: "model" as const,
++		id,
++		display_name: alias.displayName ?? id,
++		...(alias.description ? { description: alias.description } : {}),
++	}));
++}
++
++/**
++ * Merge extra entries into an upstream `/v1/models` body.
++ *
++ * Returns the new body, or null when the body is not a listing this code
++ * understands — in which case the caller must forward the original untouched.
++ * Null is the honest answer for "upstream said something unexpected"; inventing
++ * a listing on top of an error payload would turn a visible upstream failure
++ * into a plausible-looking success.
++ *
++ * Upstream always wins a collision, and always keeps its position: a client
++ * reading this must see exactly what it would have seen without the feature,
++ * plus entries at the end. That is the whole contract.
++ */
++export function mergeModelsListingBody(
++	bodyText: string,
++	extras: ModelsListingExtras = {},
++): string | null {
++	let parsed: unknown;
++	try {
++		parsed = JSON.parse(bodyText);
++	} catch {
++		return null;
++	}
++	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
++		return null;
++
++	const listing = parsed as Record<string, unknown>;
++	if (!Array.isArray(listing.data)) return null;
++
++	const seen = new Set<string>();
++	for (const entry of listing.data) {
++		if (entry && typeof entry === "object" && !Array.isArray(entry)) {
++			const id = (entry as Record<string, unknown>).id;
++			if (typeof id === "string") seen.add(id);
++		}
++	}
++
++	const additions: ModelsListingEntry[] = [];
++	const push = (entry: ModelsListingEntry): void => {
++		if (seen.has(entry.id)) return;
++		seen.add(entry.id);
++		additions.push(entry);
++	};
++
++	for (const model of extras.catalogEntries ?? []) {
++		if (!model.id) continue;
++		push({
++			type: "model",
++			id: model.id,
++			display_name: model.displayName || model.id,
++			...(model.description ? { description: model.description } : {}),
++		});
++	}
++	for (const entry of aliasListingEntries()) push(entry);
++
++	if (additions.length === 0) return null;
++
++	// A Codex listing repeats the same array under `models` alongside `data`
++	// (measured 2026-09-28). Augmenting only `data` would leave the document
++	// disagreeing with itself, so any consumer reading the other key would see
++	// a listing without the additions — a bug that only shows up on whichever
++	// key that consumer happened to pick.
++	const mirrored = Array.isArray(listing.models)
++		? { models: [...listing.models, ...additions] }
++		: {};
++
++	return JSON.stringify({
++		...listing,
++		data: [...listing.data, ...additions],
++		...mirrored,
++	});
++}
++
++/**
++ * Stream wrapper around `mergeModelsListingBody`.
++ *
++ * Buffers up to `MAX_MODELS_LISTING_MERGE_BYTES` because JSON cannot be
++ * rewritten before the whole document is in hand, then emits either the merged
++ * body or — on overflow, a parse failure, or nothing to add — the original
++ * bytes exactly as they arrived. There is no path on which this drops or
++ * reorders an upstream entry.
++ */
++export function mergeModelsListingStream(
++	upstream: ReadableStream<Uint8Array>,
++	/**
++	 * Loaded lazily and inside the stream, because the Anthropic catalog
++	 * accessor is async while the call site that builds the client body is not.
++	 * A loader that rejects degrades to aliases only rather than failing the
++	 * response — the client still gets the upstream listing either way.
++	 */
++	loadExtras: () => Promise<ModelsListingExtras> = async () => ({}),
++): ReadableStream<Uint8Array> {
++	const reader = upstream.getReader();
++
++	return new ReadableStream<Uint8Array>({
++		async start(controller) {
++			const chunks: Uint8Array[] = [];
++			let total = 0;
++			let overflowed = false;
++			try {
++				while (true) {
++					const { value, done } = await reader.read();
++					if (done) break;
++					if (!value || value.length === 0) continue;
++					chunks.push(value);
++					total += value.length;
++					if (total > MAX_MODELS_LISTING_MERGE_BYTES) {
++						overflowed = true;
++						break;
++					}
++				}
++
++				const emitOriginal = (): void => {
++					for (const chunk of chunks) controller.enqueue(chunk);
++				};
++
++				if (overflowed) {
++					log.warn(
++						`/v1/models body over ${MAX_MODELS_LISTING_MERGE_BYTES} bytes — forwarding unmerged`,
++					);
++					emitOriginal();
++					// Drain the rest so the client still gets the complete body.
++					while (true) {
++						const { value, done } = await reader.read();
++						if (done) break;
++						if (value) controller.enqueue(value);
++					}
++					controller.close();
++					reader.releaseLock();
++					return;
++				}
++
++				const joined = new Uint8Array(total);
++				let offset = 0;
++				for (const chunk of chunks) {
++					joined.set(chunk, offset);
++					offset += chunk.length;
++				}
++
++				let extras: ModelsListingExtras = {};
++				try {
++					extras = await loadExtras();
++				} catch (error) {
++					log.warn(
++						`Could not load the Anthropic catalog for the /v1/models merge — continuing with aliases only: ${error instanceof Error ? error.message : String(error)}`,
++					);
++				}
++
++				const merged = mergeModelsListingBody(
++					new TextDecoder().decode(joined),
++					extras,
++				);
++				if (merged === null) emitOriginal();
++				else controller.enqueue(new TextEncoder().encode(merged));
++
++				controller.close();
++				reader.releaseLock();
++			} catch (error) {
++				controller.error(error);
++				reader.releaseLock();
++			}
++		},
++		cancel(reason) {
++			return reader.cancel(reason).finally(() => reader.releaseLock());
++		},
++	});
++}
+diff --git a/packages/proxy/src/proxy.ts b/packages/proxy/src/proxy.ts
+index 97f60f0..0139abd 100644
+--- a/packages/proxy/src/proxy.ts
++++ b/packages/proxy/src/proxy.ts
+@@ -42,6 +42,7 @@ import {
+ 	recordXaiAffinitySuccess,
+ 	resolveEffectiveModel,
+ 	selectAccountsForRequest,
++	setAliasProvider,
+ 	setXaiConvId,
+ 	validateProviderPath,
+ } from "./handlers";
+@@ -322,6 +323,7 @@ async function handleProxyRequest(
+ 		originalModel,
+ 		appliedModel,
+ 		agentAttributionSource,
++		aliasProvider,
+ 	} = await interceptAndModifyRequest(
+ 		requestBodyContext,
+ 		ctx.dbOps,
+@@ -374,6 +376,13 @@ async function handleProxyRequest(
+ 		setXaiConvId(requestMeta, xaiConvId);
+ 	}
+ 
++	// Same side-channel treatment for a registered model alias: the interceptor
++	// has already swapped the alias id for the real model, so selection would
++	// otherwise have no way to know which provider was named.
++	if (aliasProvider) {
++		setAliasProvider(requestMeta, aliasProvider);
++	}
++
+ 	// 5b. Session volume circuit breaker: a runaway subagent storm shows up as
+ 	// one client session hammering /v1/messages. Count it here and, when
+ 	// enforcement is enabled, reject before account selection burns upstream
+diff --git a/packages/proxy/src/response-handler.ts b/packages/proxy/src/response-handler.ts
+index 5f04a87..c2189a1 100644
+--- a/packages/proxy/src/response-handler.ts
++++ b/packages/proxy/src/response-handler.ts
+@@ -17,7 +17,8 @@ import {
+ import { isInternalProbe, type ProxyContext } from "./handlers";
+ import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
+ import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
+-import { ingestModelsListing } from "./model-catalog";
++import { getModelCatalog, ingestModelsListing } from "./model-catalog";
++import { mergeModelsListingStream } from "./models-listing-merge";
+ import {
+ 	rewriteAnthropicMessageJsonModelStream,
+ 	rewriteAnthropicMessageSseModel,
+@@ -562,8 +563,30 @@ export async function forwardToClient(
+ 			false);
+ 	// As with SSE above, this transform is downstream of analytics so logs,
+ 	// pricing and usage retain the provider's real response model.
+-	const clientBody =
+-		isAnthropicMessagesJsonResponse && originalModel
++	// A successful model listing gets the registered aliases and the cached
++	// Anthropic catalog appended. Downstream of the tee above on purpose: the
++	// passive catalog capture must keep ingesting the provider's real listing,
++	// not one this process just added to itself.
++	const isModelsListingResponse =
++		method === "GET" &&
++		path === "/v1/models" &&
++		response.ok &&
++		(response.headers
++			.get("content-type")
++			?.toLowerCase()
++			.includes("application/json") ??
++			false);
++
++	const clientBody = isModelsListingResponse
++		? mergeModelsListingStream(passthroughBody, async () => {
++				const catalog = await getModelCatalog();
++				// Only a live catalog may widen a listing. The bundled fallback is
++				// a guess about what exists, and a guess presented in a listing is
++				// indistinguishable from an entitlement.
++				if (catalog.source !== "live") return {};
++				return { catalogEntries: catalog.models };
++			})
++		: isAnthropicMessagesJsonResponse && originalModel
+ 			? rewriteAnthropicMessageJsonModelStream(passthroughBody, originalModel)
+ 			: passthroughBody;
+ 

@@ -39,6 +39,7 @@ export type ModelFallback = { [modelFamily: string]: string };
 export * from "./alert-events";
 export * from "./auth-failure-events";
 export * from "./force-account-model";
+export * from "./model-aliases";
 export {
 	type IntervalConfig,
 	intervalManager,

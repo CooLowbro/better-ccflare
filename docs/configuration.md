@@ -331,6 +331,66 @@ This is off by default because it changes what a Claude family model name means 
 
 Manage this via the dashboard (Settings → Advanced → Force Account Model) or the API — see [api-http.md](api-http.md#get-apiconfigforce-account-model).
 
+## Custom Model Aliases
+
+`custom_model_aliases` (config file only — no environment variable, empty by
+default) lets a client ask for a model id that better-ccflare resolves to a
+different model on a specific provider.
+
+```json
+{
+  "custom_model_aliases": {
+    "claude-gpt-5.6-sol": {
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "displayName": "Sol xhigh",
+      "description": "GPT-5.6 Sol via Codex"
+    }
+  }
+}
+```
+
+### What it is for
+
+Some clients will only accept model ids that look like Claude models. Claude
+Code's gateway model discovery is the clearest case: it fetches
+`GET /v1/models` from the gateway and then drops every entry whose id fails
+`/(claude|anthropic)/i` before its model picker ever sees it. `gpt-5.6-sol`
+cannot survive that; `claude-gpt-5.6-sol` can.
+
+**Name aliases so they contain `claude` — and so they do NOT contain `fable`,
+`opus`, `sonnet` or `haiku`.** Those four words are how `getModelFamily` reads a
+model's family out of its id, and a family drives combo routing, per-family
+capacity accounting and the rewrite veto. An alias called
+`claude-sonnet-gpt-5.6-sol` would be accounted for as a Sonnet request while
+actually going to Codex.
+
+### How it behaves
+
+- **Resolved at ingress**, before account selection, so everything downstream
+  sees the real model. This is deliberate: the alias is what decides which
+  accounts are eligible, so it cannot be resolved after that choice.
+- **Account selection is restricted to `provider`.** If no account of that
+  provider is available the request fails rather than being served by someone
+  else — the substitution aliases exist to prevent.
+- **The response is relabelled back to the alias**, through the same machinery
+  that already relabels a mapped model, so a client sees the id it asked for.
+- **An agent model preference still wins.** A preference already overrides an
+  explicit client model today; when it fires, the alias's provider restriction
+  is dropped with it.
+- **Listed in both model endpoints.** `GET /v1/models` gets the aliases (and
+  the cached Anthropic catalog) appended to whatever the upstream answered —
+  never replacing or reordering it. `GET /api/models` tags them
+  `source: "alias"`.
+
+Manage this through the API — see
+[api-http.md](api-http.md#post-apiconfigcustom-model-aliases).
+
+**Client-side requirement:** Claude Code only performs gateway model discovery
+when `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` is set in its environment, and
+only when `ANTHROPIC_BASE_URL` points at a non-first-party host. Serving the
+aliases is necessary but not sufficient; the client has to be asking.
+
 ## Runtime Configuration API
 
 Some configuration values can be updated at runtime through the HTTP API without restarting the server.

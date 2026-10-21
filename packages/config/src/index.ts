@@ -3,6 +3,8 @@ import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
+	type CustomModelAlias,
+	type CustomModelAliases,
 	DEFAULT_AGENT_MODEL,
 	DEFAULT_STRATEGY,
 	isValidStrategy,
@@ -67,6 +69,13 @@ export type ProviderModelDefaultOverrides = Record<
 >;
 
 /**
+ * The alias types live in core, not here: the registry that resolves them has
+ * to sit beside the model-mapping funnel, which cannot import this package.
+ * Re-exported so callers that already depend on config keep one import site.
+ */
+export type { CustomModelAlias, CustomModelAliases };
+
+/**
  * Env var that expands which providers accept editable model-default
  * overrides (via the config file, the API, and the dashboard tab).
  * Absent or empty => only "codex" is editable. This gates only the
@@ -127,6 +136,7 @@ export interface ConfigData {
 	combo_session_fallback?: boolean;
 	force_account_model?: boolean;
 	provider_model_default_overrides?: ProviderModelDefaultOverrides;
+	custom_model_aliases?: CustomModelAliases;
 	agent_frontmatter_model_fallback?: boolean;
 	model_catalog_oauth_refresh_enabled?: boolean;
 	health_detail_enabled?: boolean;
@@ -163,6 +173,7 @@ export interface ConfigData {
 		| number
 		| boolean
 		| ProviderModelDefaultOverrides
+		| CustomModelAliases
 		| undefined;
 }
 
@@ -1006,6 +1017,46 @@ export class Config extends EventEmitter {
 	}
 
 	/**
+	 * Registered model aliases, sanitized. An entry missing `provider` or
+	 * `model` is dropped rather than half-applied: a half-applied alias would
+	 * resolve to an empty model name at ingress, which is far harder to
+	 * diagnose than an alias that simply is not there.
+	 */
+	getCustomModelAliases(): CustomModelAliases {
+		const raw = this.data.custom_model_aliases;
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+		const aliases: CustomModelAliases = {};
+		for (const [id, entry] of Object.entries(raw)) {
+			if (!id.trim()) continue;
+			if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+			const { provider, model, displayName, description } =
+				entry as Partial<CustomModelAlias>;
+			if (typeof provider !== "string" || !provider.trim()) continue;
+			if (typeof model !== "string" || !model.trim()) continue;
+			aliases[id.trim()] = {
+				provider: provider.trim(),
+				model: model.trim(),
+				...(typeof displayName === "string" && displayName.trim()
+					? { displayName: displayName.trim() }
+					: {}),
+				...(typeof description === "string" && description.trim()
+					? { description: description.trim() }
+					: {}),
+			};
+		}
+		return aliases;
+	}
+
+	setCustomModelAliases(aliases: CustomModelAliases): void {
+		this.data.custom_model_aliases = aliases;
+		this.saveConfig();
+		this.emit("change", {
+			key: "custom_model_aliases",
+			newValue: aliases,
+		});
+	}
+
+	/**
 	 * Providers currently allowed to edit their model-default overrides:
 	 * "codex" by default, or the exact CCFLARE_MODEL_DEFAULTS_PROVIDERS
 	 * list when that env var is set (comma-separated, trimmed). Never
@@ -1194,7 +1245,12 @@ export class Config extends EventEmitter {
 
 	getAllSettings(): Record<
 		string,
-		string | number | boolean | ProviderModelDefaultOverrides | undefined
+		| string
+		| number
+		| boolean
+		| ProviderModelDefaultOverrides
+		| CustomModelAliases
+		| undefined
 	> {
 		// Include current strategy (which might come from env)
 		return {
@@ -1217,6 +1273,7 @@ export class Config extends EventEmitter {
 			combos_enabled: this.getCombosEnabled(),
 			combo_session_fallback: this.getComboSessionFallback(),
 			force_account_model: this.getForceAccountModel(),
+			custom_model_aliases: this.getCustomModelAliases(),
 			agent_frontmatter_model_fallback: this.getAgentFrontmatterModelFallback(),
 			model_catalog_oauth_refresh_enabled:
 				this.getModelCatalogOAuthRefreshEnabled(),
