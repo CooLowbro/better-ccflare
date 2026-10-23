@@ -136,6 +136,11 @@ const CODEX_SYNTHETIC_COUNT_TOKENS_URL =
 // every subsequent turn bloats context and destroys prompt-cache reuse.
 const CODEX_MAX_STRUCTURED_BLOCK_CHARS = 8_192;
 
+// Stand-in for an image whose source has no Responses equivalent (a Files API
+// file_id, a malformed block). Convertible images travel as input_image.
+const CODEX_UNSUPPORTED_IMAGE_TEXT =
+	"[image content omitted: source not supported by Codex]";
+
 const _normalizeUsage = (value: unknown): Record<string, number> => {
 	const usage =
 		typeof value === "object" && value !== null
@@ -256,6 +261,16 @@ interface CodexOutputTextItem {
 	text: string;
 }
 
+// Same shape the Codex CLI sends for local images (protocol ContentItem::
+// InputImage): an inline data URL with detail "high", its default.
+interface CodexInputImageItem {
+	type: "input_image";
+	image_url: string;
+	detail?: "auto" | "low" | "high" | "original";
+}
+
+type CodexToolOutputContentItem = CodexInputTextItem | CodexInputImageItem;
+
 interface CodexFunctionCallItem {
 	type: "function_call";
 	call_id: string;
@@ -267,12 +282,13 @@ interface CodexFunctionCallItem {
 interface CodexFunctionCallOutputItem {
 	type: "function_call_output";
 	call_id: string;
-	output: string;
+	output: string | CodexToolOutputContentItem[];
 	status?: "in_progress" | "completed" | "incomplete";
 }
 
 type CodexContentItem =
 	| CodexInputTextItem
+	| CodexInputImageItem
 	| CodexOutputTextItem
 	| CodexFunctionCallItem
 	| CodexFunctionCallOutputItem;
@@ -388,8 +404,19 @@ interface AnthropicToolResult {
 		  }>;
 }
 
+interface AnthropicImageContent {
+	type: "image";
+	source?: {
+		type?: string;
+		media_type?: string;
+		data?: string;
+		url?: string;
+	};
+}
+
 type AnthropicContentBlock =
 	| AnthropicTextContent
+	| AnthropicImageContent
 	| AnthropicToolUse
 	| AnthropicToolResult;
 
@@ -2132,24 +2159,60 @@ export class CodexProvider extends BaseProvider {
 		);
 	}
 
+	/**
+	 * Anthropic image block → Responses input_image. Base64 sources become a
+	 * data URL; http(s) and data URLs pass through. Anything else (a Files API
+	 * file_id, a malformed source) has no Responses equivalent and yields null.
+	 */
+	private toCodexInputImage(block: unknown): CodexInputImageItem | null {
+		const source = (block as AnthropicImageContent).source;
+		if (!source || typeof source !== "object") return null;
+		let imageUrl: string | undefined;
+		if (
+			source.type === "base64" &&
+			typeof source.data === "string" &&
+			source.data.length > 0 &&
+			typeof source.media_type === "string" &&
+			source.media_type.startsWith("image/")
+		) {
+			imageUrl = `data:${source.media_type};base64,${source.data}`;
+		} else if (
+			source.type === "url" &&
+			typeof source.url === "string" &&
+			/^(https?:\/\/|data:image\/)/.test(source.url)
+		) {
+			imageUrl = source.url;
+		}
+		return imageUrl
+			? { type: "input_image", image_url: imageUrl, detail: "high" }
+			: null;
+	}
+
 	private serializeToolResultContent(
 		content: AnthropicToolResult["content"],
-	): string {
+	): string | CodexToolOutputContentItem[] {
 		if (typeof content === "string") return content;
 		// External input can violate the declared type (missing, null, object);
 		// degrade to an empty output rather than throwing, because a throw here
 		// is swallowed by transformRequestBody and forwards the untranslated
 		// Anthropic body upstream.
 		if (!Array.isArray(content)) return "";
-		const parts: string[] = [];
+		const items: CodexToolOutputContentItem[] = [];
+		let hasImage = false;
 		for (const block of content) {
 			if (!block || typeof block !== "object") continue;
 			if (block.type === "text" && typeof block.text === "string") {
-				parts.push(block.text);
+				items.push({ type: "input_text", text: block.text });
 				continue;
 			}
 			if (block.type === "image") {
-				parts.push("[image content not supported in Codex tool results]");
+				const image = this.toCodexInputImage(block);
+				if (image) {
+					items.push(image);
+					hasImage = true;
+				} else {
+					items.push({ type: "input_text", text: CODEX_UNSUPPORTED_IMAGE_TEXT });
+				}
 				continue;
 			}
 			let serialized: string;
@@ -2159,14 +2222,20 @@ export class CodexProvider extends BaseProvider {
 				continue;
 			}
 			if (serialized.length > CODEX_MAX_STRUCTURED_BLOCK_CHARS) {
-				parts.push(
-					`[${String(block.type ?? "unknown")} content omitted: ${serialized.length} chars]`,
-				);
+				items.push({
+					type: "input_text",
+					text: `[${String(block.type ?? "unknown")} content omitted: ${serialized.length} chars]`,
+				});
 				continue;
 			}
-			parts.push(serialized);
+			items.push({ type: "input_text", text: serialized });
 		}
-		return parts.join("\n");
+		// Text-only results keep the joined-string wire form, so conversations
+		// without images replay byte-identically and keep their cached prefix.
+		if (!hasImage) {
+			return items.map((item) => (item as CodexInputTextItem).text).join("\n");
+		}
+		return items;
 	}
 
 	private convertMessage(
@@ -2191,26 +2260,36 @@ export class CodexProvider extends BaseProvider {
 			return items;
 		}
 
-		// Complex content array: may contain tool_use, tool_result, text.
+		// Complex content array: may contain tool_use, tool_result, text, image.
 		// Preserve source order so Codex sees the same block chronology the
 		// client sent: outputs stay adjacent to their calls, and follow-up text
-		// stays after the results it refers to. Consecutive text blocks batch
-		// into one message wrapper; function_call* are top-level items.
-		let pendingText: CodexContentItem[] = [];
+		// stays after the results it refers to. Consecutive text and image
+		// blocks batch into one message wrapper; function_call* are top-level
+		// items.
+		let pendingContent: CodexContentItem[] = [];
 		const flushText = () => {
-			if (pendingText.length === 0) return;
-			items.push({ role, content: pendingText } as CodexMessage);
-			pendingText = [];
+			if (pendingContent.length === 0) return;
+			items.push({ role, content: pendingContent } as CodexMessage);
+			pendingContent = [];
 		};
 
 		for (const block of msg.content) {
 			if (!block || typeof block !== "object") continue;
 			if (block.type === "text") {
 				const contentType = role === "assistant" ? "output_text" : "input_text";
-				pendingText.push({
+				pendingContent.push({
 					type: contentType,
 					text: block.text,
 				} as CodexContentItem);
+			} else if (block.type === "image") {
+				// Responses has no assistant-side image; Anthropic never sends one.
+				if (role === "assistant") continue;
+				pendingContent.push(
+					this.toCodexInputImage(block) ?? {
+						type: "input_text",
+						text: CODEX_UNSUPPORTED_IMAGE_TEXT,
+					},
+				);
 			} else if (block.type === "tool_use") {
 				flushText();
 				items.push({
@@ -2225,11 +2304,17 @@ export class CodexProvider extends BaseProvider {
 			} else if (block.type === "tool_result") {
 				flushText();
 				const serialized = this.serializeToolResultContent(block.content);
+				let output = serialized;
+				if (block.is_error === true) {
+					output =
+						typeof serialized === "string"
+							? `[tool error] ${serialized}`
+							: [{ type: "input_text", text: "[tool error]" }, ...serialized];
+				}
 				items.push({
 					type: "function_call_output",
 					call_id: block.tool_use_id,
-					output:
-						block.is_error === true ? `[tool error] ${serialized}` : serialized,
+					output,
 					status: "completed",
 				});
 			}
