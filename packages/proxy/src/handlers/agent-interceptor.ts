@@ -137,6 +137,23 @@ export async function interceptAndModifyRequest(
 					`Model alias ${originalModel} -> ${alias.model} (provider ${alias.provider})`,
 				);
 				bodyContext.setModel(alias.model);
+				// The Responses adapter keeps the client's model a second time, in
+				// the Codex side channel, and the Codex provider prefers that copy
+				// over body.model. Resolve it here as well, or routing picks the
+				// right account and the alias id still goes out on the wire.
+				const resolvedModel = alias.model;
+				bodyContext.mutateParsedJson((body) => {
+					const passthrough = (body as Record<string, unknown>)
+						.__better_ccflare_codex_passthrough;
+					if (
+						passthrough !== null &&
+						typeof passthrough === "object" &&
+						!Array.isArray(passthrough) &&
+						(passthrough as Record<string, unknown>).model === originalModel
+					) {
+						(passthrough as Record<string, unknown>).model = resolvedModel;
+					}
+				});
 				aliasProvider = alias.provider;
 				aliasedModel = alias.model;
 			}

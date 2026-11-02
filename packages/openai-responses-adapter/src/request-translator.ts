@@ -1,4 +1,5 @@
 import {
+	isForceAccountModelEnabled,
 	LATEST_HAIKU_MODEL,
 	LATEST_OPUS_MODEL,
 	LATEST_SONNET_MODEL,
@@ -61,6 +62,10 @@ function createTranslationWarnings(): TranslationWarnings {
 //   gpt-5*  → sonnet (default capable tier, everything else)
 // Non-gpt-5 names (e.g. gpt-4) are passed through unchanged.
 function mapGptModelToClaudeFamily(model: string): string {
+	// Force account model means the model the caller named or none. Swapping
+	// gpt-* for a Claude family here would happen before the selector's guard,
+	// which would then faithfully enforce the wrong model.
+	if (isForceAccountModelEnabled()) return model;
 	const lower = model.toLowerCase();
 	if (!lower.startsWith("gpt-")) return model;
 	if (lower.endsWith("-pro")) return LATEST_OPUS_MODEL;
