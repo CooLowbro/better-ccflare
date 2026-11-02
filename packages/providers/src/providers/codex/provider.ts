@@ -2960,9 +2960,22 @@ export class CodexProvider extends BaseProvider {
 			"client_metadata",
 			"access_programs",
 		] as const) {
-			if (passthrough?.[field] !== undefined) {
-				codexRequest[field] = passthrough[field];
+			if (passthrough?.[field] === undefined) continue;
+			// The ChatGPT-subscription endpoint rejects sampling controls on every
+			// model, whatever the reasoning effort (measured 2026-11-02: HTTP 400
+			// "Unsupported parameter: temperature", also with effort "none").
+			// Clients such as voice platforms always send one, so forwarding it
+			// would fail the whole request; drop it and say so.
+			if (
+				isSubscriptionEndpoint &&
+				(field === "temperature" || field === "top_p")
+			) {
+				log.warn(
+					`Dropping ${field} for the Codex subscription endpoint, which does not accept it`,
+				);
+				continue;
 			}
+			codexRequest[field] = passthrough[field];
 		}
 		if (
 			typeof passthrough?.previous_response_id === "string" &&
