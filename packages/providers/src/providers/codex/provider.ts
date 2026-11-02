@@ -568,6 +568,51 @@ const CODEX_CONTINUATION_MAX_LANES = 2_048;
 const UUID_RE =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+/**
+ * Read just enough of a body to tell whether it is an SSE stream, and hand
+ * back a stream that still yields every byte, the sniffed ones first.
+ */
+async function sniffSseHead(
+	body: ReadableStream<Uint8Array>,
+): Promise<{ isSse: boolean; body: ReadableStream<Uint8Array> }> {
+	const reader = body.getReader();
+	const head: Uint8Array[] = [];
+	const decoder = new TextDecoder();
+	let text = "";
+	let done = false;
+	while (!done && text.trimStart().length < "event:".length) {
+		const result = await reader.read();
+		done = result.done;
+		if (result.value) {
+			head.push(result.value);
+			text += decoder.decode(result.value, { stream: true });
+		}
+	}
+	const isSse = /^(?:event:|data:|:)/.test(text.trimStart());
+	const replay = new ReadableStream<Uint8Array>({
+		start(controller) {
+			for (const chunk of head) controller.enqueue(chunk);
+			if (done) controller.close();
+		},
+		async pull(controller) {
+			try {
+				const result = await reader.read();
+				if (result.done) {
+					controller.close();
+				} else {
+					controller.enqueue(result.value);
+				}
+			} catch (error) {
+				controller.error(error);
+			}
+		},
+		cancel(reason) {
+			return reader.cancel(reason);
+		},
+	});
+	return { isSse, body: replay };
+}
+
 export class CodexProvider extends BaseProvider {
 	name = "codex";
 	private readonly cacheDiagnostics = new CodexCacheDiagnostics(
@@ -1143,7 +1188,33 @@ export class CodexProvider extends BaseProvider {
 					: (fallbackEntry?.nativeResponses ?? false);
 		// Not deleted: an in-place 529 retry re-invokes processResponse and needs
 		// this entry too. sweepRequestStreamById reclaims it after 30s instead.
-		const isEventStream = contentType?.includes("text/event-stream") ?? false;
+		let isEventStream = contentType?.includes("text/event-stream") ?? false;
+		// chatgpt.com's Codex endpoint was measured (2026-11-02) answering a
+		// streamed request with no content-type at all. Trusting the absent
+		// header sent native requests down the buffered fallback below: the
+		// whole stream was read before the client saw a byte, the client got no
+		// text/event-stream, and the usage collector never parsed the stream.
+		// Native requests are always streamed upstream, so look at the first
+		// bytes instead and keep the rest flowing.
+		if (
+			!isEventStream &&
+			!contentType &&
+			nativeResponses &&
+			response.ok &&
+			response.body !== null
+		) {
+			const sniffed = await sniffSseHead(response.body);
+			const headers = new Headers(response.headers);
+			if (sniffed.isSse) {
+				headers.set("content-type", "text/event-stream");
+				isEventStream = true;
+			}
+			response = new Response(sniffed.body, {
+				status: response.status,
+				statusText: response.statusText,
+				headers,
+			});
+		}
 		if (isEventStream) {
 			// Requests accepted on /v1/responses already speak the upstream wire
 			// format. Keep their response IDs, cache diagnostics, and continuation
