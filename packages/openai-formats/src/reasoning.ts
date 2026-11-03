@@ -6,7 +6,14 @@
  */
 import { getModelFamily, ValidationError } from "@better-ccflare/core";
 
+// "none" turns reasoning off. OpenAI added it after this list was written
+// (GPT-5.1 onward; GPT-6.1 Terra, GPT-6 Sol and GPT-6 Luna accept it, GPT-6.1
+// Sol and GPT-6 Astra do not). Measured 2026-11-02 on the Codex subscription
+// endpoint: gpt-6.1-terra, gpt-6-luna and gpt-5.6-terra answer with "none",
+// gpt-6.1-sol refuses it upstream. Rejecting it here meant no client could
+// ever switch reasoning off through the proxy.
 export const REASONING_EFFORT_VALUES = [
+	"none",
 	"minimal",
 	"low",
 	"medium",
@@ -17,6 +24,7 @@ export const REASONING_EFFORT_VALUES = [
 export type ReasoningEffort = (typeof REASONING_EFFORT_VALUES)[number];
 
 const EFFORT_RANK: Record<ReasoningEffort, number> = {
+	none: -1,
 	minimal: 0,
 	low: 1,
 	medium: 2,
@@ -42,7 +50,7 @@ const CLAUDE_REASONING_EFFORTS: Record<
 };
 
 const TARGET_REASONING_EFFORTS: Record<string, readonly ReasoningEffort[]> = {
-	"gpt-5": ["minimal", "low", "medium", "high", "xhigh"],
+	"gpt-5": ["none", "minimal", "low", "medium", "high", "xhigh"],
 	"gpt-5.3-codex": ["minimal", "low", "medium", "high", "xhigh"],
 	"gpt-5.4-mini": ["low", "medium"],
 };

@@ -616,7 +616,7 @@ describe("CodexProvider request conversion", () => {
 		});
 
 		await expect(provider.transformRequestBody(request)).rejects.toThrow(
-			"reasoning.effort must be one of: minimal, low, medium, high, xhigh, max",
+			"reasoning.effort must be one of: none, minimal, low, medium, high, xhigh, max",
 		);
 	});
 

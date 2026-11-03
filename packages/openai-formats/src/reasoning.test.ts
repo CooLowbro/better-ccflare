@@ -68,8 +68,30 @@ describe("reasoning effort support", () => {
 				targetModel: "gpt-5.3-codex",
 			}),
 		).toThrow(
-			"reasoning.effort must be one of: minimal, low, medium, high, xhigh, max",
+			"reasoning.effort must be one of: none, minimal, low, medium, high, xhigh, max",
 		);
+	});
+
+	it("accepts none and passes it through to a model that supports it", () => {
+		const gpt6 = resolveReasoningEffort("none", {
+			sourceModel: "gpt-6.1-terra",
+			targetModel: "gpt-6.1-terra",
+		});
+		expect(gpt6).toEqual({ effort: "none", downgrades: [] });
+		const gpt56 = resolveReasoningEffort("none", {
+			sourceModel: "gpt-5.6-terra",
+			targetModel: "gpt-5.6-terra",
+		});
+		expect(gpt56).toEqual({ effort: "none", downgrades: [] });
+	});
+
+	it("clamps none up to the minimum on a model without it", () => {
+		expect(
+			validateReasoningEffort("none", {
+				sourceModel: "gpt-5.4-mini",
+				targetModel: "gpt-5.4-mini",
+			}),
+		).toBe("low");
 	});
 
 	it("passes through effort unchanged when target model is unknown", () => {

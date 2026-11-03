@@ -11,6 +11,7 @@ import {
 	ProviderError,
 	splitModelRouting,
 	TIME_CONSTANTS,
+	ValidationError,
 } from "@better-ccflare/core";
 import { withSanitizedProxyHeaders } from "@better-ccflare/http-common";
 import { Logger } from "@better-ccflare/logger";
@@ -3102,6 +3103,20 @@ export async function proxyWithAccount(
 				`Client disconnected during request to ${account.name} — ending instead of failing over`,
 			);
 			return new Response(null, { status: 499 });
+		}
+		// A request the provider rejects as invalid (e.g. an unknown
+		// reasoning.effort) is the client's error, not this account's: every
+		// other account would reject it the same way. Failing over turned it
+		// into "all accounts failed" and a misleading 503.
+		if (err instanceof ValidationError) {
+			log.warn(`Rejecting invalid request: ${err.message}`);
+			return new Response(
+				JSON.stringify({
+					type: "error",
+					error: { type: "invalid_request_error", message: err.message },
+				}),
+				{ status: 400, headers: { "Content-Type": "application/json" } },
+			);
 		}
 		handleProxyError(err, account, log);
 		return null;
