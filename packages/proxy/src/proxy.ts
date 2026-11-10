@@ -63,6 +63,7 @@ import {
 	type UsageCollectorHealth,
 } from "./usage-collector";
 import { maybeInterceptWebSearch } from "./web-tools/intercept";
+import { isLocalWebSearchInScope } from "./web-tools/artel-scope";
 
 export type { ProxyContext } from "./handlers";
 
@@ -320,7 +321,8 @@ async function handleProxyRequest(
 	// 3d. Serve `web_search` helper requests locally when a provider is configured.
 	// A null result means "not a search request" or "no provider could serve it",
 	// and the request continues upstream unchanged.
-	if (parsedBody) {
+	// Artel: only for aliases served by a non-Anthropic provider (artel-scope.ts).
+	if (parsedBody && isLocalWebSearchInScope(parsedBody)) {
 		const webSearchResponse = await maybeInterceptWebSearch({
 			body: parsedBody,
 			pathname: url.pathname,
