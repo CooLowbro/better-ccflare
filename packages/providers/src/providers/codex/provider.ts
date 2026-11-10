@@ -457,6 +457,24 @@ interface FunctionCallBuffer {
 	contentBlockIndex: number;
 	name: string;
 	arguments: string[];
+	// Argumentos inteiros de response.function_call_arguments.done. Em chamadas
+	// paralelas o Codex nao manda nenhum delta, so este evento e o item final.
+	finalArguments?: string;
+}
+
+/**
+ * Os argumentos completos de uma function_call, na ordem de autoridade: o item
+ * final (output_item.done), o evento function_call_arguments.done e, por
+ * ultimo, os deltas acumulados. Valor vazio nao conta como resposta.
+ */
+function resolveFunctionCallArguments(
+	item: Record<string, unknown> | undefined,
+	buffer: FunctionCallBuffer,
+): string {
+	const fromItem = item?.arguments;
+	if (typeof fromItem === "string" && fromItem.length > 0) return fromItem;
+	if (buffer.finalArguments) return buffer.finalArguments;
+	return buffer.arguments.join("");
 }
 
 interface ContextWindowUsage {
@@ -3830,6 +3848,18 @@ export class CodexProvider extends BaseProvider {
 				break;
 			}
 
+			case "response.function_call_arguments.done": {
+				const args = data.arguments as string | undefined;
+				const outputIndex = data.output_index as number | undefined;
+				if (typeof args === "string" && outputIndex !== undefined) {
+					const buffer = state.functionCallBlocks.get(outputIndex);
+					if (buffer) {
+						buffer.finalArguments = args;
+					}
+				}
+				break;
+			}
+
 			case "response.output_item.done": {
 				const item = data.item as Record<string, unknown> | undefined;
 				const itemType = item?.type as string | undefined;
@@ -3848,7 +3878,7 @@ export class CodexProvider extends BaseProvider {
 								type: "input_json_delta",
 								partial_json: this.sanitizeToolUsePartialJson(
 									buffer.name,
-									buffer.arguments.join(""),
+									resolveFunctionCallArguments(item, buffer),
 								),
 							},
 						});

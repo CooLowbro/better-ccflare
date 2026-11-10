@@ -918,6 +918,87 @@ describe("CodexProvider.processResponse", () => {
 		expect(transformedBody).not.toContain("blocked_domains");
 	});
 
+	// Formato medido em 10/11/2026 no SSE cru do chatgpt.com (gpt-6.1-sol,
+	// parallel_tool_calls): com duas chamadas na mesma resposta o Codex NAO
+	// manda function_call_arguments.delta. Os argumentos chegam inteiros em
+	// function_call_arguments.done e em output_item.done.item.arguments.
+	const parallelCallsWithoutDeltas = (withItemArguments: boolean) =>
+		sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_par", model: "gpt-6.1-sol" },
+			}),
+			...[
+				["fc_a", "call_a", '{"path": "a.txt"}'],
+				["fc_b", "call_b", '{"path": "b.txt"}'],
+			].flatMap(([id, callId, args], outputIndex) => [
+				...eventLine("response.output_item.added", {
+					item: {
+						type: "function_call",
+						id,
+						call_id: callId,
+						name: "read_file",
+						arguments: "",
+						status: "in_progress",
+					},
+					output_index: outputIndex,
+				}),
+				...eventLine("response.function_call_arguments.done", {
+					item_id: id,
+					output_index: outputIndex,
+					arguments: args,
+				}),
+				...eventLine("response.output_item.done", {
+					item: {
+						type: "function_call",
+						id,
+						call_id: callId,
+						name: "read_file",
+						...(withItemArguments ? { arguments: args } : {}),
+						status: "completed",
+					},
+					output_index: outputIndex,
+				}),
+			]),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-6.1-sol",
+					usage: { input_tokens: 1, output_tokens: 1 },
+				},
+			}),
+		]);
+
+	const inputJsonDeltas = (body: string) =>
+		body
+			.split("\n")
+			.filter((line) => line.includes('"input_json_delta"'))
+			.map((line) => JSON.parse(line.slice("data: ".length)));
+
+	for (const withItemArguments of [true, false]) {
+		it(`keeps the arguments of parallel function calls sent without deltas (item.arguments ${withItemArguments ? "present" : "absent"})`, async () => {
+			const provider = new CodexProvider();
+			const response = new Response(
+				parallelCallsWithoutDeltas(withItemArguments),
+				{
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				},
+			);
+
+			const transformed = await provider.processResponse(response, null);
+			const deltas = inputJsonDeltas(await transformed.text());
+
+			expect(deltas).toHaveLength(2);
+			expect(deltas[0].index).toBe(0);
+			expect(JSON.parse(deltas[0].delta.partial_json)).toEqual({
+				path: "a.txt",
+			});
+			expect(deltas[1].index).toBe(1);
+			expect(JSON.parse(deltas[1].delta.partial_json)).toEqual({
+				path: "b.txt",
+			});
+		});
+	}
+
 	it("uses the function_call block index rather than the current text block index", async () => {
 		const provider = new CodexProvider();
 		const upstreamBody = sseBody([
